@@ -146,11 +146,14 @@ cython_debug/
 # Project specific
 *.db
 *.sqlite
+.db-journal
 data/
+data/*/
 logs/
 .cache/
 temp/
 tmp/
+.ruff_cache/
 
 # Database credentials
 .credentials/

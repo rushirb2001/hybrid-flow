@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "hybrid-flow"
+name = "hybridflow"
 version = "0.1.0"
 description = "Adaptive ingestion pipeline for hierarchical structured data with hybrid vector-graph storage, automatic schema validation with graceful degradation, multi-tier parsing strategies, version tracking, and comprehensive quality monitoring."
 authors = ["Rushir Bhavsar"]
 readme = "README.md"
-packages = [{include = "hybrid_flow", from = "src"}]
+packages = [{include = "hybridflow", from = "src"}]
 license = "Proprietary"
 keywords = ["data-pipeline", "vector-database", "graph-database", "qdrant", "neo4j", "data-ingestion"]
 classifiers = [
@@ -56,7 +56,7 @@ pdoc = "^14.3.0"
 tox = "^4.11.0"
 
 [tool.poetry.scripts]
-hybrid-flow = "hybrid_flow.cli:main"
+hybridflow = "hybridflow.cli:main"
 
 [build-system]
 requires = ["poetry-core"]
@@ -120,7 +120,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -q --strict-markers --cov=hybrid_flow --cov-report=term-missing --cov-report=html"
+addopts = "-ra -q --strict-markers --cov=hybridflow --cov-report=term-missing --cov-report=html"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

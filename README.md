@@ -63,8 +63,17 @@ pip install -e .
 
 ## Quick Start
 
+```bash
+# Start database services
+docker-compose up -d
+
+# Copy environment template and configure
+cp .env.example .env
+# Edit .env with your configuration
+```
+
 ```python
-from hybrid_flow import Pipeline
+from hybridflow import Pipeline
 
 # Initialize the pipeline
 pipeline = Pipeline(
@@ -80,30 +89,28 @@ pipeline.ingest(data_source)
 
 ```
 hybrid-flow/
-├── .git/                  # Git repository
+├── .env.example           # Environment variables template
 ├── .gitignore             # Git ignore rules
 ├── LICENSE                # Proprietary license
 ├── README.md              # This file
+├── docker-compose.yml     # Docker services (Qdrant + Neo4j)
 ├── pyproject.toml         # Poetry configuration
-├── config/                # Configuration templates
-├── docs/                  # Documentation
-├── examples/              # Usage examples
-├── scripts/               # Utility scripts
+├── data/                  # Data directory (gitignored)
+│   ├── bailey/            # Bailey dataset
+│   ├── sabiston/          # Sabiston dataset
+│   └── schwartz/          # Schwartz dataset
 ├── src/
-│   └── hybrid-flow/       # Main package
+│   └── hybridflow/        # Main package
+│       ├── __init__.py
+│       ├── cli/           # Command-line interface
+│       ├── ingestion/     # Data ingestion pipeline
+│       ├── parsing/       # Multi-tier parsing strategies
+│       ├── storage/       # Vector & graph database storage
+│       └── validation/    # Schema validation & quality checks
 └── tests/                 # Test suite
-    └── __init__.py
+    ├── __init__.py
+    └── conftest.py        # Pytest fixtures and configuration
 ```
-
-## Documentation
-
-Comprehensive documentation is available in the `docs/` directory and includes:
-
-- Architecture overview
-- API reference
-- Configuration guide
-- Integration examples
-- Performance tuning
 
 ## Development
 
