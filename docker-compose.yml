@@ -24,29 +24,17 @@ services:
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
-      - neo4j_import:/var/lib/neo4j/import
-      - neo4j_plugins:/plugins
     environment:
       - NEO4J_AUTH=neo4j/password
-      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
-      - NEO4J_dbms_memory_pagecache_size=1G
-      - NEO4J_dbms_memory_heap_initial__size=1G
-      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_PLUGINS=["apoc"]
     restart: unless-stopped
     networks:
       - hybridflow-network
 
 volumes:
   qdrant_storage:
-    driver: local
   neo4j_data:
-    driver: local
   neo4j_logs:
-    driver: local
-  neo4j_import:
-    driver: local
-  neo4j_plugins:
-    driver: local
 
 networks:
   hybridflow-network:
