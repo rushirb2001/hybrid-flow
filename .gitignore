@@ -167,3 +167,6 @@ docker-compose.override.yml
 
 # Great Expectations
 uncommitted/
+
+# Project documentation
+CLAUDE.md
