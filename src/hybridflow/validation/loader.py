@@ -1,10 +1,16 @@
 """JSON file loader with validation and normalization."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Union
 
+from pydantic import ValidationError
+
 from hybridflow.models import Chapter, TextbookEnum
+from hybridflow.validation.error_handler import normalize_chapter_data
+
+logger = logging.getLogger(__name__)
 
 
 class JSONLoader:
@@ -155,39 +161,51 @@ class JSONLoader:
 
         Returns:
             Validated Chapter instance
+
+        Raises:
+            ValueError: If chapter cannot be parsed after error handling attempts
         """
-        # Load raw JSON
-        raw_data = self.load_json(file_path)
+        try:
+            # Load raw JSON
+            raw_data = self.load_json(file_path)
 
-        # Detect textbook
-        textbook_id = self.detect_textbook(file_path)
+            # Detect textbook
+            textbook_id = self.detect_textbook(file_path)
 
-        # Normalize chapter number if present
-        if "chapter_number" in raw_data:
-            raw_data["chapter_number"] = self.normalize_chapter_number(
-                raw_data["chapter_number"]
+            # Apply error handler normalizations
+            raw_data = normalize_chapter_data(raw_data)
+
+            # Normalize chapter number if present
+            if "chapter_number" in raw_data:
+                raw_data["chapter_number"] = self.normalize_chapter_number(
+                    raw_data["chapter_number"]
+                )
+
+            # Normalize reference labels
+            if "references" in raw_data and raw_data["references"]:
+                for ref in raw_data["references"]:
+                    if "label" in ref:
+                        ref["label"] = self.normalize_reference_label(ref["label"])
+
+            # Normalize all bounds throughout the structure
+            self.normalize_structure_bounds(raw_data)
+
+            # Add textbook_id and source_file_path
+            raw_data["textbook_id"] = textbook_id
+            raw_data["source_file_path"] = file_path
+
+            # Create and return Chapter model
+            return Chapter(**raw_data)
+
+        except ValidationError as e:
+            logger.error(
+                f"Validation error parsing {file_path}: {e.error_count()} errors"
             )
+            logger.debug(f"Validation details: {e}")
+            raise ValueError(
+                f"Cannot parse chapter from {file_path}: {e.error_count()} validation errors"
+            ) from e
 
-        # Handle missing key_points field
-        if "key_points" not in raw_data:
-            raw_data["key_points"] = []
-
-        # Handle missing authors field
-        if "authors" not in raw_data:
-            raw_data["authors"] = None
-
-        # Normalize reference labels
-        if "references" in raw_data and raw_data["references"]:
-            for ref in raw_data["references"]:
-                if "label" in ref:
-                    ref["label"] = self.normalize_reference_label(ref["label"])
-
-        # Normalize all bounds throughout the structure
-        self.normalize_structure_bounds(raw_data)
-
-        # Add textbook_id and source_file_path
-        raw_data["textbook_id"] = textbook_id
-        raw_data["source_file_path"] = file_path
-
-        # Create and return Chapter model
-        return Chapter(**raw_data)
+        except Exception as e:
+            logger.error(f"Unexpected error parsing {file_path}: {e}")
+            raise ValueError(f"Cannot parse chapter from {file_path}: {e}") from e
