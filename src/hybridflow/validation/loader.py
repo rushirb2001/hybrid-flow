@@ -71,6 +71,82 @@ class JSONLoader:
         """
         return str(label).rstrip(".").strip()
 
+    def normalize_bounds(self, bounds) -> dict:
+        """Normalize bounds from array to dictionary format.
+
+        Args:
+            bounds: Bounds as list [x1, y1, x2, y2] or dict
+
+        Returns:
+            Bounds as dictionary {"x1": ..., "y1": ..., "x2": ..., "y2": ...}
+        """
+        if isinstance(bounds, list) and len(bounds) == 4:
+            return {"x1": bounds[0], "y1": bounds[1], "x2": bounds[2], "y2": bounds[3]}
+        return bounds
+
+    def normalize_structure_bounds(self, data: dict) -> None:
+        """Recursively normalize bounds in chapter structure.
+
+        Args:
+            data: Dictionary containing chapter data to normalize in-place
+        """
+        # Normalize key_points bounds
+        if "key_points" in data and data["key_points"]:
+            for kp in data["key_points"]:
+                if "bounds" in kp:
+                    kp["bounds"] = self.normalize_bounds(kp["bounds"])
+
+        # Normalize sections
+        if "sections" in data:
+            for section in data["sections"]:
+                # Section paragraphs
+                if "paragraphs" in section:
+                    for para in section["paragraphs"]:
+                        if "bounds" in para:
+                            para["bounds"] = self.normalize_bounds(para["bounds"])
+                        # Normalize tables and figures in paragraphs
+                        if "tables" in para and para["tables"]:
+                            for table in para["tables"]:
+                                if "bounds" in table:
+                                    table["bounds"] = self.normalize_bounds(table["bounds"])
+                        if "figures" in para and para["figures"]:
+                            for figure in para["figures"]:
+                                if "bounds" in figure:
+                                    figure["bounds"] = self.normalize_bounds(figure["bounds"])
+
+                # Subsections
+                if "subsections" in section:
+                    for subsection in section["subsections"]:
+                        # Subsection paragraphs
+                        if "paragraphs" in subsection:
+                            for para in subsection["paragraphs"]:
+                                if "bounds" in para:
+                                    para["bounds"] = self.normalize_bounds(para["bounds"])
+                                if "tables" in para and para["tables"]:
+                                    for table in para["tables"]:
+                                        if "bounds" in table:
+                                            table["bounds"] = self.normalize_bounds(table["bounds"])
+                                if "figures" in para and para["figures"]:
+                                    for figure in para["figures"]:
+                                        if "bounds" in figure:
+                                            figure["bounds"] = self.normalize_bounds(figure["bounds"])
+
+                        # Subsubsections
+                        if "subsubsections" in subsection:
+                            for subsubsection in subsection["subsubsections"]:
+                                if "paragraphs" in subsubsection:
+                                    for para in subsubsection["paragraphs"]:
+                                        if "bounds" in para:
+                                            para["bounds"] = self.normalize_bounds(para["bounds"])
+                                        if "tables" in para and para["tables"]:
+                                            for table in para["tables"]:
+                                                if "bounds" in table:
+                                                    table["bounds"] = self.normalize_bounds(table["bounds"])
+                                        if "figures" in para and para["figures"]:
+                                            for figure in para["figures"]:
+                                                if "bounds" in figure:
+                                                    figure["bounds"] = self.normalize_bounds(figure["bounds"])
+
     def parse_chapter(self, file_path: str) -> Chapter:
         """Parse JSON file into validated Chapter model.
 
@@ -105,6 +181,9 @@ class JSONLoader:
             for ref in raw_data["references"]:
                 if "label" in ref:
                     ref["label"] = self.normalize_reference_label(ref["label"])
+
+        # Normalize all bounds throughout the structure
+        self.normalize_structure_bounds(raw_data)
 
         # Add textbook_id and source_file_path
         raw_data["textbook_id"] = textbook_id

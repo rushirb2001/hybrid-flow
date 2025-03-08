@@ -191,26 +191,28 @@ class Neo4jStorage:
         self,
         paragraph_chunk_id: str,
         table_number: str,
-        file_png: str,
-        file_xlsx: str,
         description: str,
         page: int,
+        bounds: List[float],
+        file_png: str = "",
+        file_xlsx: str = "",
     ) -> None:
         """Insert or update a table node and link to paragraph.
 
         Args:
             paragraph_chunk_id: Parent paragraph chunk identifier
             table_number: Table number
-            file_png: PNG file path
-            file_xlsx: Excel file path
             description: Table description
             page: Page number
+            bounds: Bounding box coordinates [x1, y1, x2, y2]
+            file_png: PNG file path (optional)
+            file_xlsx: Excel file path (optional)
         """
         query = """
         MATCH (p:Paragraph {chunk_id: $paragraph_chunk_id})
         MERGE (t:Table {paragraph_id: $paragraph_chunk_id, table_number: $table_number})
         SET t.file_png = $file_png, t.file_xlsx = $file_xlsx,
-            t.description = $description, t.page = $page
+            t.description = $description, t.page = $page, t.bounds = $bounds
         MERGE (p)-[:CONTAINS_TABLE]->(t)
         """
         with self.driver.session() as session:
@@ -222,29 +224,32 @@ class Neo4jStorage:
                 file_xlsx=file_xlsx,
                 description=description,
                 page=page,
+                bounds=bounds,
             )
 
     def upsert_figure(
         self,
         paragraph_chunk_id: str,
         figure_number: str,
-        file_png: str,
         caption: str,
         page: int,
+        bounds: List[float],
+        file_png: str = "",
     ) -> None:
         """Insert or update a figure node and link to paragraph.
 
         Args:
             paragraph_chunk_id: Parent paragraph chunk identifier
             figure_number: Figure number
-            file_png: PNG file path
             caption: Figure caption
             page: Page number
+            bounds: Bounding box coordinates [x1, y1, x2, y2]
+            file_png: PNG file path (optional)
         """
         query = """
         MATCH (p:Paragraph {chunk_id: $paragraph_chunk_id})
         MERGE (f:Figure {paragraph_id: $paragraph_chunk_id, figure_number: $figure_number})
-        SET f.file_png = $file_png, f.caption = $caption, f.page = $page
+        SET f.file_png = $file_png, f.caption = $caption, f.page = $page, f.bounds = $bounds
         MERGE (p)-[:CONTAINS_FIGURE]->(f)
         """
         with self.driver.session() as session:
@@ -255,6 +260,7 @@ class Neo4jStorage:
                 file_png=file_png,
                 caption=caption,
                 page=page,
+                bounds=bounds,
             )
 
     def get_chapter_hierarchy(self, chapter_id: str) -> Dict:
