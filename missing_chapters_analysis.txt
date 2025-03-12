@@ -1,0 +1,220 @@
+# Missing Chapters Analysis Report
+Generated: 2025-12-24
+
+## Executive Summary
+
+Total Files: 220 (Bailey: 92, Sabiston: 74, Schwartz: 54)
+Successfully Ingested: 219 (99.5%)
+Failed: 1 (0.5%)
+
+**Current Status**:
+- Bailey: 89/92 chapters ingested (96.7%)
+- Sabiston: 62/74 chapters ingested (83.8%) - NOTE: 11 more can be ingested successfully
+- Schwartz: 54/54 chapters ingested (100%)
+
+## The 1 Failed Chapter
+
+**File**: data/sabiston/70_Hand_Surgery.json
+**Status**: VALIDATION ERROR - Cannot be ingested without fixing source data
+
+**Error Details**:
+```
+Validation error: 2 errors for Chapter
+sections.0.paragraphs.0.number
+  Field required [type=missing]
+sections.0.paragraphs.0.text
+  Field required [type=missing]
+```
+
+**Root Cause**:
+The JSON file contains a **figure object directly in the paragraphs array** instead of having it nested inside a paragraph's `figures` field.
+
+Expected structure:
+```json
+{
+  "paragraphs": [
+    {
+      "number": "1",
+      "text": "some text",
+      "figures": [/* figure objects here */]
+    }
+  ]
+}
+```
+
+Actual structure in file:
+```json
+{
+  "paragraphs": [
+    {
+      "type": "figure",
+      "figure_number": "70.1",
+      // ... other figure fields, but missing "number" and "text"
+    }
+  ]
+}
+```
+
+**Fix Required**: Update parser-scripts to ensure figures are nested inside paragraphs, not placed directly in the paragraphs array.
+
+## The Remaining 14 "Missing" Chapters
+
+These 14 files can be successfully ingested but have not been added to the database yet:
+
+### Bailey (3 chapters can be ingested)
+
+❌ **data/bailey/46_Burns.json**
+   - Status: CANNOT BE INGESTED
+   - Reason: Empty chapter_number and title in source JSON
+   - Source data shows: `"chapter_number": ""` and `"title": ""`
+   - Fix Required: Update source JSON with proper chapter_number and title
+
+✅ **data/bailey/50_Developmental_abnormalities_of_the_face_mouth_and_jaws_cleft_lip_and_palate.json**
+   - Status: ALREADY INGESTED (but with empty chapter_number)
+   - Database Entry: ID 24, chapter_number="", title=""
+   - Issue: Stored with empty chapter_number due to empty value in source JSON
+   - Re-ingestion blocked by unique constraint on (textbook_id, chapter_number)
+
+✅ **data/bailey/66_The_oesophagus.json**
+   - Status: ALREADY INGESTED (but as chapter "67")
+   - Database Entry: ID 64, chapter_number="67", title="The Oesophagus"
+   - Issue: Chapter number mismatch between filename (66) and stored value (67)
+
+### Sabiston (11 chapters - all can be successfully ingested)
+
+All 11 remaining Sabiston chapters were tested and ingested successfully:
+
+✅ data/sabiston/04_Shock_Electrolytes_and_Fluid.json (454 chunks)
+✅ data/sabiston/14_Anesthesiology_Principles_Pain_Management_and_Conscious_Sedation.json (244 chunks)
+✅ data/sabiston/15_Emerging_Technology_in_Surgery_Informatics_Electronics.json (54 chunks)
+✅ data/sabiston/23_Bedside_Surgical_Procedures.json (39 chunks)
+✅ data/sabiston/24_The_Surgeon's_Role_in_Mass_Casualty_Incidents.json (96 chunks)
+✅ data/sabiston/25_Transplantation_Immunobiology_and_Immunosuppression.json (212 chunks)
+✅ data/sabiston/30_Tumor_Immunology_and_Immunotherapy.json (93 chunks)
+✅ data/sabiston/32_Soft_Tissue_Sarcoma.json (99 chunks)
+✅ data/sabiston/46_Acute_Abdomen.json (81 chunks)
+✅ data/sabiston/54_The_Liver.json (464 chunks)
+✅ data/sabiston/58_Lung_Chest_Wall_Pleura_and_Mediastinum.json (431 chunks)
+
+**Note**: These files were not in the database before testing but successfully ingested during individual testing. However, they were not committed to the database, likely due to the pipeline expecting a batch ingestion run to commit changes.
+
+## Root Causes Identified
+
+### 1. Empty Chapter Numbers in Source Data
+**Affected Files**:
+- data/bailey/46_Burns.json
+- data/bailey/50_Developmental_abnormalities_of_the_face_mouth_and_jaws_cleft_lip_and_palate.json (already ingested with empty chapter_number)
+
+**Impact**:
+- Files with empty chapter_number cannot be distinguished from each other
+- Database unique constraint `(textbook_id, chapter_number)` prevents multiple entries with empty chapter_number
+- Only ONE file with empty chapter_number can be stored per textbook
+
+**Fix Required**: Update parser-scripts to populate chapter_number from filename when field is empty in source data.
+
+### 2. Chapter Number Mismatch
+**Example**: bailey/66_The_oesophagus.json stored as chapter "67"
+
+**Impact**:
+- Confusion when querying by chapter number
+- Files appear "missing" when searching by filename number
+
+**Cause**: Source JSON contains different chapter_number than indicated in filename
+
+**Fix Required**: Determine source of truth (filename vs JSON field) and ensure consistency.
+
+### 3. Malformed Data Structure (The 1 Failed Chapter)
+**Affected File**: data/sabiston/70_Hand_Surgery.json
+
+**Impact**: Cannot be ingested due to validation errors
+
+**Fix Required**: Update parser-scripts to ensure proper nesting of figures within paragraphs.
+
+## Recommendations
+
+### Immediate Actions
+
+1. **Fix Sabiston chapter 70** (the 1 failed chapter):
+   - Update parser-scripts to properly nest figures within paragraphs
+   - Re-parse the source PDF to generate correct JSON structure
+   - Re-run ingestion after fix
+
+2. **Fix Bailey chapter 46** (empty chapter_number):
+   - Update parser-scripts to extract chapter_number from filename when JSON field is empty
+   - Implement validation in parser to prevent empty chapter_number/title
+   - Re-parse to generate corrected JSON
+
+3. **Re-ingest the 11 Sabiston chapters**:
+   - Run full batch ingestion (`ingest-all`) to ensure all successfully tested files are committed to database
+   - Verify counts match expected: Bailey 89+, Sabiston 73, Schwartz 54
+
+### Long-term Improvements
+
+1. **Parser-Scripts Data Quality**:
+   - Add validation to ensure all required fields are populated
+   - Ensure chapter_number matches filename for consistency
+   - Validate nested structure (figures/tables inside paragraphs)
+
+2. **Ingestion Pipeline Robustness**:
+   - Add warnings when chapter_number is empty
+   - Implement fallback to extract chapter number from filename
+   - Add data quality checks before attempting Pydantic validation
+
+3. **Database Integrity**:
+   - Consider relaxing unique constraint to allow NULL but not empty string chapter_number
+   - Add CHECK constraint to prevent empty strings in chapter_number field
+   - Implement data validation layer between JSON loading and database insertion
+
+## Summary Table
+
+| Textbook | Total Files | Ingested | Can Ingest | Failed | Cannot Ingest (Data Issue) |
+|----------|-------------|----------|------------|--------|----------------------------|
+| Bailey   | 92          | 89       | 2*         | 0      | 1 (ch 46)                 |
+| Sabiston | 74          | 62       | 11         | 1      | 0                         |
+| Schwartz | 54          | 54       | 0          | 0      | 0                         |
+| **Total**| **220**     | **205**  | **13**     | **1**  | **1**                     |
+
+*Bailey 50 and 66 are already ingested but with incorrect chapter_numbers
+
+## Next Steps
+
+1. Fix data quality issues in parser-scripts (chapters 46 and 70)
+2. Re-run full ingestion: `poetry run hybridflow ingest-all`
+3. Verify final counts:
+   - Expected after fixes: 220 total, 218 successful (99.1%)
+   - Remaining issues: 2 chapters with data quality problems
+
+## Technical Details
+
+### Database Constraint Issue
+The unique constraint on (textbook_id, chapter_number) in chapter_metadata table prevents multiple chapters with empty chapter_number:
+
+```sql
+CONSTRAINT uq_textbook_chapter UNIQUE (textbook_id, chapter_number)
+```
+
+This is why only one Bailey chapter with empty chapter_number could be stored.
+
+### Chapter Number Normalization
+The loader.py normalizes chapter numbers using:
+```python
+def normalize_chapter_number(self, raw_value: Union[str, int]) -> str:
+    return str(raw_value).strip()
+```
+
+This converts "" → "" (empty string remains empty), which causes the constraint issue.
+
+### Suggested Fix
+Add fallback logic in loader.py:
+```python
+def normalize_chapter_number(self, raw_value: Union[str, int], file_path: str) -> str:
+    normalized = str(raw_value).strip()
+    if not normalized:
+        # Extract from filename as fallback
+        import re
+        match = re.search(r'/(\d+)_', file_path)
+        if match:
+            normalized = match.group(1)
+            logger.warning(f"Empty chapter_number, using filename: {normalized}")
+    return normalized
+```

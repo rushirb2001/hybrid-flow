@@ -8,7 +8,10 @@ from typing import Union
 from pydantic import ValidationError
 
 from hybridflow.models import Chapter, TextbookEnum
-from hybridflow.validation.error_handler import normalize_chapter_data
+from hybridflow.validation.error_handler import (
+    clean_paragraphs_array,
+    normalize_chapter_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +58,40 @@ class JSONLoader:
         else:
             raise ValueError(f"Cannot detect textbook type from path: {file_path}")
 
-    def normalize_chapter_number(self, raw_value: Union[str, int]) -> str:
+    def normalize_chapter_number(
+        self, raw_value: Union[str, int], file_path: str = ""
+    ) -> str:
         """Normalize chapter number to string format.
 
         Args:
             raw_value: Raw chapter number as string or integer
+            file_path: Path to source file (used as fallback if raw_value is empty)
 
         Returns:
             Normalized chapter number as string
+
+        Raises:
+            ValueError: If both raw_value and filename extraction fail
         """
-        return str(raw_value).strip()
+        normalized = str(raw_value).strip()
+
+        # If empty, try to extract from filename
+        if not normalized and file_path:
+            import re
+
+            match = re.search(r"/(\d+)_", file_path)
+            if match:
+                normalized = match.group(1)
+                logger.warning(
+                    f"Empty chapter_number in JSON, extracted from filename: {normalized}"
+                )
+            else:
+                raise ValueError(
+                    f"Cannot determine chapter_number: empty in JSON and "
+                    f"cannot extract from filename: {file_path}"
+                )
+
+        return normalized
 
     def normalize_reference_label(self, label: Union[str, int]) -> str:
         """Normalize reference label by removing trailing periods.
@@ -89,6 +116,35 @@ class JSONLoader:
         if isinstance(bounds, list) and len(bounds) == 4:
             return {"x1": bounds[0], "y1": bounds[1], "x2": bounds[2], "y2": bounds[3]}
         return bounds
+
+    def clean_structure_paragraphs(self, data: dict) -> None:
+        """Recursively clean malformed paragraphs in chapter structure.
+
+        Args:
+            data: Dictionary containing chapter data to clean in-place
+        """
+        # Clean paragraphs in sections
+        if "sections" in data:
+            for section in data["sections"]:
+                # Clean section paragraphs
+                if "paragraphs" in section:
+                    section["paragraphs"] = clean_paragraphs_array(section["paragraphs"])
+
+                # Clean subsection paragraphs
+                if "subsections" in section:
+                    for subsection in section["subsections"]:
+                        if "paragraphs" in subsection:
+                            subsection["paragraphs"] = clean_paragraphs_array(
+                                subsection["paragraphs"]
+                            )
+
+                        # Clean subsubsection paragraphs
+                        if "subsubsections" in subsection:
+                            for subsubsection in subsection["subsubsections"]:
+                                if "paragraphs" in subsubsection:
+                                    subsubsection["paragraphs"] = clean_paragraphs_array(
+                                        subsubsection["paragraphs"]
+                                    )
 
     def normalize_structure_bounds(self, data: dict) -> None:
         """Recursively normalize bounds in chapter structure.
@@ -178,7 +234,7 @@ class JSONLoader:
             # Normalize chapter number if present
             if "chapter_number" in raw_data:
                 raw_data["chapter_number"] = self.normalize_chapter_number(
-                    raw_data["chapter_number"]
+                    raw_data["chapter_number"], file_path
                 )
 
             # Normalize reference labels
@@ -186,6 +242,9 @@ class JSONLoader:
                 for ref in raw_data["references"]:
                     if "label" in ref:
                         ref["label"] = self.normalize_reference_label(ref["label"])
+
+            # Clean malformed paragraphs throughout the structure
+            self.clean_structure_paragraphs(raw_data)
 
             # Normalize all bounds throughout the structure
             self.normalize_structure_bounds(raw_data)

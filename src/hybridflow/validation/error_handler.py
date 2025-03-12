@@ -128,6 +128,51 @@ def normalize_authors_field(raw_dict: dict) -> dict:
     return raw_dict
 
 
+def clean_paragraphs_array(paragraphs: List) -> List:
+    """Filter out malformed paragraph objects from paragraphs array.
+
+    Removes any dict that doesn't have both 'number' and 'text' fields.
+    This handles cases where figures/tables are incorrectly placed directly
+    in the paragraphs array instead of being nested.
+
+    Args:
+        paragraphs: List of paragraph dictionaries to clean
+
+    Returns:
+        Cleaned list containing only valid paragraph objects
+    """
+    if not paragraphs:
+        return paragraphs
+
+    cleaned = []
+    removed_count = 0
+
+    for para in paragraphs:
+        if isinstance(para, dict):
+            # Check if it has both required fields
+            if "number" in para and "text" in para:
+                cleaned.append(para)
+            else:
+                removed_count += 1
+                # Log what type of object was removed
+                obj_type = para.get("type", "unknown")
+                logger.warning(
+                    f"Removed malformed paragraph object (type={obj_type}, "
+                    f"has_number={'number' in para}, has_text={'text' in para})"
+                )
+        else:
+            logger.warning(f"Removed non-dict object from paragraphs: {type(para)}")
+            removed_count += 1
+
+    if removed_count > 0:
+        logger.info(
+            f"Cleaned paragraphs array: removed {removed_count} malformed objects, "
+            f"kept {len(cleaned)} valid paragraphs"
+        )
+
+    return cleaned
+
+
 def normalize_chapter_data(raw_data: dict) -> dict:
     """Apply all normalization fixes to chapter data.
 
