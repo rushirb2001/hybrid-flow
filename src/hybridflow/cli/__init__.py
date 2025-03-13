@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from hybridflow.cli.query import add_query_commands
 from hybridflow.ingestion.pipeline import IngestionPipeline
 
 
@@ -258,6 +259,9 @@ def main() -> int:
         help="Base directory containing textbook subdirectories (default: ./data)",
     )
     parser_all.set_defaults(func=cmd_ingest_all)
+
+    # Add query commands
+    add_query_commands(subparsers)
 
     args = parser.parse_args()
 
