@@ -60,11 +60,12 @@ class IngestionPipeline:
         # Set up logging
         self.logger = logging.getLogger(__name__)
 
-    def ingest_chapter(self, file_path: str) -> Dict:
+    def ingest_chapter(self, file_path: str, force: bool = False) -> Dict:
         """Ingest a single chapter from JSON file into all storage backends.
 
         Args:
             file_path: Path to chapter JSON file
+            force: If True, force re-ingestion even if content unchanged
 
         Returns:
             Dict with status, chunks_inserted count
@@ -79,7 +80,7 @@ class IngestionPipeline:
                 chapter.textbook_id.value, chapter.chapter_number
             )
 
-            if existing and existing.content_hash == content_hash:
+            if existing and existing.content_hash == content_hash and not force:
                 self.logger.info(
                     f"Chapter {chapter.textbook_id.value}:{chapter.chapter_number} unchanged, skipping"
                 )
@@ -255,11 +256,12 @@ class IngestionPipeline:
             self.logger.error(f"Failed to ingest {file_path}: {e}")
             return {"status": "failed", "chunks_inserted": 0, "error": str(e)}
 
-    def ingest_directory(self, directory_path: str) -> Dict:
+    def ingest_directory(self, directory_path: str, force: bool = False) -> Dict:
         """Ingest all JSON files from a directory.
 
         Args:
             directory_path: Path to directory containing chapter JSON files
+            force: If True, force re-ingestion even if content unchanged
 
         Returns:
             Summary dict with total_files, successful_count, failed_count, skipped_count
@@ -275,7 +277,7 @@ class IngestionPipeline:
         }
 
         for json_file in json_files:
-            result = self.ingest_chapter(str(json_file))
+            result = self.ingest_chapter(str(json_file), force=force)
 
             if result["status"] == "success":
                 results["successful_count"] += 1

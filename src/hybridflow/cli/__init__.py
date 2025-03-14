@@ -96,7 +96,7 @@ def cmd_ingest_file(args: argparse.Namespace) -> int:
         pipeline = create_pipeline(config)
 
         logger.info(f"Ingesting file: {file_path}")
-        result = pipeline.ingest_chapter(str(file_path))
+        result = pipeline.ingest_chapter(str(file_path), force=args.force)
 
         if result["status"] == "success":
             logger.info(
@@ -143,7 +143,7 @@ def cmd_ingest_dir(args: argparse.Namespace) -> int:
         pipeline = create_pipeline(config)
 
         logger.info(f"Ingesting directory: {dir_path}")
-        result = pipeline.ingest_directory(str(dir_path))
+        result = pipeline.ingest_directory(str(dir_path), force=args.force)
 
         logger.info(
             f"Ingestion complete: {result['successful_count']} succeeded, "
@@ -192,7 +192,7 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
                 continue
 
             logger.info(f"Processing textbook: {textbook}")
-            result = pipeline.ingest_directory(str(textbook_dir))
+            result = pipeline.ingest_directory(str(textbook_dir), force=args.force)
 
             total_successful += result["successful_count"]
             total_skipped += result["skipped_count"]
@@ -240,6 +240,9 @@ def main() -> int:
         "ingest-file", help="Ingest a single chapter JSON file"
     )
     parser_file.add_argument("file_path", help="Path to JSON file to ingest")
+    parser_file.add_argument(
+        "--force", action="store_true", help="Force re-ingestion even if unchanged"
+    )
     parser_file.set_defaults(func=cmd_ingest_file)
 
     # ingest-dir command
@@ -247,6 +250,9 @@ def main() -> int:
         "ingest-dir", help="Ingest all JSON files from a directory"
     )
     parser_dir.add_argument("directory_path", help="Path to directory containing JSON files")
+    parser_dir.add_argument(
+        "--force", action="store_true", help="Force re-ingestion even if unchanged"
+    )
     parser_dir.set_defaults(func=cmd_ingest_dir)
 
     # ingest-all command
@@ -257,6 +263,9 @@ def main() -> int:
         "--base-dir",
         default="./data",
         help="Base directory containing textbook subdirectories (default: ./data)",
+    )
+    parser_all.add_argument(
+        "--force", action="store_true", help="Force re-ingestion even if unchanged"
     )
     parser_all.set_defaults(func=cmd_ingest_all)
 
