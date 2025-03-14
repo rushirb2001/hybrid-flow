@@ -57,7 +57,7 @@ class Neo4jStorage:
         """
         chapter_id = f"{textbook_id}:ch{chapter_number}"
         query = """
-        MATCH (t:Textbook {id: $textbook_id})
+        MERGE (t:Textbook {id: $textbook_id})
         MERGE (c:Chapter {id: $chapter_id})
         SET c.number = $chapter_number, c.title = $title, c.version = $version
         MERGE (t)-[:CONTAINS]->(c)
@@ -84,7 +84,7 @@ class Neo4jStorage:
         """
         section_id = f"{chapter_id}:s{section_number}"
         query = """
-        MATCH (c:Chapter {id: $chapter_id})
+        MERGE (c:Chapter {id: $chapter_id})
         MERGE (s:Section {id: $section_id})
         SET s.number = $section_number, s.title = $title
         MERGE (c)-[:HAS_SECTION]->(s)
@@ -110,7 +110,7 @@ class Neo4jStorage:
         """
         subsection_id = f"{section_id}:ss{subsection_number}"
         query = """
-        MATCH (s:Section {id: $section_id})
+        MERGE (s:Section {id: $section_id})
         MERGE (ss:Subsection {id: $subsection_id})
         SET ss.number = $subsection_number, ss.title = $title
         MERGE (s)-[:HAS_SUBSECTION]->(ss)
@@ -136,7 +136,7 @@ class Neo4jStorage:
         """
         subsubsection_id = f"{subsection_id}:sss{subsubsection_number}"
         query = """
-        MATCH (ss:Subsection {id: $subsection_id})
+        MERGE (ss:Subsection {id: $subsection_id})
         MERGE (sss:Subsubsection {id: $subsubsection_id})
         SET sss.number = $subsubsection_number, sss.title = $title
         MERGE (ss)-[:HAS_SUBSUBSECTION]->(sss)
@@ -170,11 +170,14 @@ class Neo4jStorage:
             bounds: Bounding box coordinates [x1, y1, x2, y2]
         """
         query = """
-        MATCH (parent)
-        WHERE parent.id = $parent_id
         MERGE (p:Paragraph {chunk_id: $chunk_id})
         SET p.number = $paragraph_number, p.text = $text, p.page = $page, p.bounds = $bounds
-        MERGE (parent)-[:HAS_PARAGRAPH]->(p)
+        WITH p
+        OPTIONAL MATCH (parent)
+        WHERE parent.id = $parent_id
+        FOREACH (ignored IN CASE WHEN parent IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (parent)-[:HAS_PARAGRAPH]->(p)
+        )
         """
         with self.driver.session() as session:
             session.run(

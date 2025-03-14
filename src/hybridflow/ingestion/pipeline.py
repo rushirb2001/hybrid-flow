@@ -168,7 +168,7 @@ class IngestionPipeline:
                     )
 
                     if subsection:
-                        subsection_id = f"{chapter_id}:ss{subsection.number}"
+                        subsection_id = f"{section_id}:ss{subsection.number}"
                         self.neo4j_storage.upsert_subsection(
                             section_id=section_id,
                             subsection_number=subsection.number,
@@ -176,7 +176,7 @@ class IngestionPipeline:
                         )
 
                         if subsubsection:
-                            subsubsection_id = f"{chapter_id}:sss{subsubsection.number}"
+                            subsubsection_id = f"{subsection_id}:sss{subsubsection.number}"
                             self.neo4j_storage.upsert_subsubsection(
                                 subsection_id=subsection_id,
                                 subsubsection_number=subsubsection.number,
