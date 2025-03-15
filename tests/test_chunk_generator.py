@@ -242,3 +242,200 @@ def test_chunk_id_format(sample_chapter):
     for chunk_id, paragraph, hierarchy_path in chunks:
         assert pattern.match(chunk_id), f"Invalid chunk ID format: {chunk_id}"
         assert chunk_id.startswith("bailey:ch2:")
+
+
+# TASK 3: Cross-Reference Functionality Tests
+
+
+def test_extract_references_figure_parentheses():
+    """Test extracting figure references with parentheses format."""
+    generator = ChunkGenerator()
+    text = "The anatomy is shown in (Figure 60.5) with detailed labeling."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 1
+    assert refs[0]["type"] == "figure"
+    assert refs[0]["number"] == "60.5"
+
+
+def test_extract_references_figure_brackets():
+    """Test extracting figure references with square brackets format."""
+    generator = ChunkGenerator()
+    text = "See [Figure 60.1] for more details."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 1
+    assert refs[0]["type"] == "figure"
+    assert refs[0]["number"] == "60.1"
+
+
+def test_extract_references_figure_abbreviated():
+    """Test extracting figure references with Fig. abbreviation."""
+    generator = ChunkGenerator()
+    text = "Compare Fig. 2.1 with the previous diagram."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 1
+    assert refs[0]["type"] == "figure"
+    assert refs[0]["number"] == "2.1"
+
+
+def test_extract_references_figure_abbreviated_no_dot():
+    """Test extracting figure references with Fig abbreviation (no dot)."""
+    generator = ChunkGenerator()
+    text = "Shown in Fig 3.4 below."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 1
+    assert refs[0]["type"] == "figure"
+    assert refs[0]["number"] == "3.4"
+
+
+def test_extract_references_table():
+    """Test extracting table references."""
+    generator = ChunkGenerator()
+    text = "Refer to Table 60.3 for measurements."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 1
+    assert refs[0]["type"] == "table"
+    assert refs[0]["number"] == "60.3"
+
+
+def test_extract_references_table_brackets():
+    """Test extracting table references with brackets."""
+    generator = ChunkGenerator()
+    text = "See [Table 2.1] for comparison."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 1
+    assert refs[0]["type"] == "table"
+    assert refs[0]["number"] == "2.1"
+
+
+def test_extract_references_multiple_mixed():
+    """Test extracting multiple figure and table references."""
+    generator = ChunkGenerator()
+    text = "Multiple refs: (Figure 1.1), Fig. 1.2, and [Table 1.1] show the data."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 3
+    assert refs[0]["type"] == "figure"
+    assert refs[0]["number"] == "1.1"
+    assert refs[1]["type"] == "figure"
+    assert refs[1]["number"] == "1.2"
+    assert refs[2]["type"] == "table"
+    assert refs[2]["number"] == "1.1"
+
+
+def test_extract_references_multiple_same_type():
+    """Test extracting multiple references of the same type."""
+    generator = ChunkGenerator()
+    text = "See (Figure 60.1) and (Figure 60.2) for details."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 2
+    assert all(ref["type"] == "figure" for ref in refs)
+    assert refs[0]["number"] == "60.1"
+    assert refs[1]["number"] == "60.2"
+
+
+def test_extract_references_no_references():
+    """Test that no references are extracted when none are present."""
+    generator = ChunkGenerator()
+    text = "This paragraph contains no figure or table references at all."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 0
+
+
+def test_extract_references_deduplication():
+    """Test that duplicate references are removed."""
+    generator = ChunkGenerator()
+    text = "See (Figure 1.1) and also Figure 1.1 again and [Figure 1.1] once more."
+
+    refs = generator.extract_references(text)
+
+    # Should only return one reference despite multiple mentions
+    assert len(refs) == 1
+    assert refs[0]["type"] == "figure"
+    assert refs[0]["number"] == "1.1"
+
+
+def test_extract_references_case_insensitive():
+    """Test that reference extraction is case insensitive."""
+    generator = ChunkGenerator()
+    text = "See (figure 2.3) and (FIGURE 2.4) and (Table 3.1)."
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 3
+    assert refs[0]["number"] == "2.3"
+    assert refs[1]["number"] == "2.4"
+    assert refs[2]["number"] == "3.1"
+
+
+def test_extract_references_complex_text():
+    """Test extraction from complex medical text with multiple references."""
+    generator = ChunkGenerator()
+    text = (
+        "The lungs are divided into lobes (Figure 60.1). "
+        "The bronchial tree structure is shown in Fig. 60.2, "
+        "while the vascular supply is detailed in [Figure 60.3]. "
+        "Refer to Table 60.1 for segmental divisions and "
+        "Table 60.2 for anatomical measurements."
+    )
+
+    refs = generator.extract_references(text)
+
+    assert len(refs) == 5
+    figures = [ref for ref in refs if ref["type"] == "figure"]
+    tables = [ref for ref in refs if ref["type"] == "table"]
+
+    assert len(figures) == 3
+    assert len(tables) == 2
+    assert figures[0]["number"] == "60.1"
+    assert figures[1]["number"] == "60.2"
+    assert figures[2]["number"] == "60.3"
+    assert tables[0]["number"] == "60.1"
+    assert tables[1]["number"] == "60.2"
+
+
+def test_extract_references_returns_list():
+    """Test that extract_references always returns a list."""
+    generator = ChunkGenerator()
+
+    # Empty text
+    refs = generator.extract_references("")
+    assert isinstance(refs, list)
+    assert len(refs) == 0
+
+    # Text with references
+    refs = generator.extract_references("See (Figure 1.1)")
+    assert isinstance(refs, list)
+    assert len(refs) == 1
+
+
+def test_extract_references_dict_structure():
+    """Test that extracted references have correct dictionary structure."""
+    generator = ChunkGenerator()
+    text = "See (Figure 60.5) and Table 60.3."
+
+    refs = generator.extract_references(text)
+
+    for ref in refs:
+        assert isinstance(ref, dict)
+        assert "type" in ref
+        assert "number" in ref
+        assert ref["type"] in ["figure", "table"]
+        assert isinstance(ref["number"], str)
+        assert re.match(r"\d+\.\d+", ref["number"])

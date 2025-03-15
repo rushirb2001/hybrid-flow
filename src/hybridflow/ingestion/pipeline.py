@@ -188,7 +188,10 @@ class IngestionPipeline:
                     else:
                         parent_id = section_id
 
-                    # Upsert paragraph node
+                    # Extract cross-references from paragraph text
+                    cross_references = self.chunk_generator.extract_references(paragraph.text)
+
+                    # Upsert paragraph node with cross-references
                     self.neo4j_storage.upsert_paragraph(
                         parent_id=parent_id,
                         paragraph_number=paragraph.number,
@@ -201,6 +204,7 @@ class IngestionPipeline:
                             paragraph.bounds.x2,
                             paragraph.bounds.y2,
                         ],
+                        cross_references=cross_references,
                     )
 
                     # Upsert tables if present

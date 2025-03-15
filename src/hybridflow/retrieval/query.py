@@ -1,5 +1,6 @@
 """Query engine for semantic search and context retrieval."""
 
+import json
 import logging
 from typing import Dict, List, Optional
 
@@ -134,6 +135,7 @@ class QueryEngine:
         before_count: int = 2,
         after_count: int = 2,
         include_section_context: bool = False,
+        include_references: bool = False,
     ) -> List[Dict]:
         """Perform hybrid search combining vector search with graph traversal.
 
@@ -145,9 +147,10 @@ class QueryEngine:
             before_count: Number of paragraphs to retrieve before each result (if expand_paragraphs=True)
             after_count: Number of paragraphs to retrieve after each result (if expand_paragraphs=True)
             include_section_context: Whether to include parent section summary (TASK 2.3)
+            include_references: Whether to include referenced figures/tables (TASK 3.3)
 
         Returns:
-            List of results with text, score, and optional hierarchical context and surrounding paragraphs
+            List of results with text, score, and optional hierarchical context, surrounding paragraphs, and references
         """
         search_results = self.semantic_search(query_text, limit=limit)
 
@@ -241,6 +244,17 @@ class QueryEngine:
                                     result["hierarchy"] = summary["hierarchy"]
                                 if "chapter_id" not in result:
                                     result["chapter_id"] = summary["chapter_id"]
+
+        # TASK 3.3: Add cross-referenced figures/tables
+        if include_references:
+            for result in search_results:
+                chunk_id = result["chunk_id"]
+                referenced_content = self.get_referenced_content(chunk_id)
+
+                # Always add referenced_content field for consistency,
+                # even if there are no references (empty list)
+                if referenced_content:
+                    result["referenced_content"] = referenced_content
 
         return search_results
 
@@ -608,6 +622,145 @@ class QueryEngine:
                     "requested_after": after_count,
                     "returned_before": len([p for p in record["before"] if p]),
                     "returned_after": len([p for p in record["after"] if p]),
+                },
+            }
+
+    def get_referenced_content(self, chunk_id: str) -> Optional[Dict]:
+        """Retrieve figures and tables referenced by a paragraph.
+
+        Reads the paragraph's pre-computed cross_references property and fetches
+        the complete Figure/Table entities including file paths for efficient
+        retrieval without re-parsing text.
+
+        Args:
+            chunk_id: Paragraph chunk identifier
+
+        Returns:
+            Dictionary with:
+                - chunk_id: The paragraph chunk ID
+                - references: List of figure/table dictionaries with complete data
+                - counts: Summary of reference types found
+
+        Examples:
+            >>> result = engine.get_referenced_content("bailey:ch60:1.2.1")
+            >>> result["references"]
+            [
+                {
+                    "type": "figure",
+                    "number": "60.1",
+                    "caption": "...",
+                    "file_png": "figures/fileoutpart0.png",
+                    ...
+                }
+            ]
+        """
+        # First get the paragraph's cross_references property
+        query = """
+        MATCH (p:Paragraph {chunk_id: $chunk_id})
+        RETURN p.cross_references as cross_references
+        """
+
+        with self.neo4j.session() as session:
+            result = session.run(query, chunk_id=chunk_id)
+            record = result.single()
+
+            if not record or not record["cross_references"]:
+                return {
+                    "chunk_id": chunk_id,
+                    "references": [],
+                    "counts": {"figures": 0, "tables": 0},
+                }
+
+            # Deserialize cross_references from JSON string
+            cross_references_json = record["cross_references"]
+            cross_references = json.loads(cross_references_json) if cross_references_json else []
+
+            # Fetch actual Figure/Table entities for each reference
+            references = []
+            figure_count = 0
+            table_count = 0
+
+            for ref in cross_references:
+                ref_type = ref["type"]
+                ref_number = ref["number"]
+
+                if ref_type == "figure":
+                    # Look up Figure node by figure_number
+                    fig_query = """
+                    MATCH (f:Figure {figure_number: $figure_number})
+                    RETURN f.figure_number as number,
+                           f.caption as caption,
+                           f.file_png as file_png,
+                           f.page as page,
+                           f.bounds as bounds,
+                           f.paragraph_id as paragraph_id
+                    LIMIT 1
+                    """
+                    fig_result = session.run(fig_query, figure_number=ref_number)
+                    fig_record = fig_result.single()
+
+                    if fig_record:
+                        references.append({
+                            "type": "figure",
+                            "number": fig_record["number"],
+                            "caption": fig_record["caption"],
+                            "file_png": fig_record["file_png"],
+                            "page": fig_record["page"],
+                            "bounds": fig_record["bounds"],
+                            "source_paragraph_id": fig_record["paragraph_id"],
+                        })
+                        figure_count += 1
+                    else:
+                        # Reference found but entity missing (edge case)
+                        references.append({
+                            "type": "figure",
+                            "number": ref_number,
+                            "error": "Figure entity not found in database",
+                        })
+
+                elif ref_type == "table":
+                    # Look up Table node by table_number
+                    table_query = """
+                    MATCH (t:Table {table_number: $table_number})
+                    RETURN t.table_number as number,
+                           t.description as description,
+                           t.file_png as file_png,
+                           t.file_xlsx as file_xlsx,
+                           t.page as page,
+                           t.bounds as bounds,
+                           t.paragraph_id as paragraph_id
+                    LIMIT 1
+                    """
+                    table_result = session.run(table_query, table_number=ref_number)
+                    table_record = table_result.single()
+
+                    if table_record:
+                        references.append({
+                            "type": "table",
+                            "number": table_record["number"],
+                            "description": table_record["description"],
+                            "file_png": table_record["file_png"],
+                            "file_xlsx": table_record["file_xlsx"],
+                            "page": table_record["page"],
+                            "bounds": table_record["bounds"],
+                            "source_paragraph_id": table_record["paragraph_id"],
+                        })
+                        table_count += 1
+                    else:
+                        # Reference found but entity missing (edge case)
+                        references.append({
+                            "type": "table",
+                            "number": ref_number,
+                            "error": "Table entity not found in database",
+                        })
+
+            return {
+                "chunk_id": chunk_id,
+                "references": references,
+                "counts": {
+                    "figures": figure_count,
+                    "tables": table_count,
+                    "total": figure_count + table_count,
                 },
             }
 

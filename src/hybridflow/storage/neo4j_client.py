@@ -1,5 +1,6 @@
 """Neo4j graph database client for hierarchical data storage."""
 
+import json
 from typing import Dict, List
 
 from neo4j import GraphDatabase
@@ -158,6 +159,7 @@ class Neo4jStorage:
         chunk_id: str,
         page: int,
         bounds: List[float],
+        cross_references: List[Dict] = None,
     ) -> None:
         """Insert or update a paragraph node and link to parent.
 
@@ -168,10 +170,20 @@ class Neo4jStorage:
             chunk_id: Unique chunk identifier
             page: Page number
             bounds: Bounding box coordinates [x1, y1, x2, y2]
+            cross_references: List of cross-references to figures/tables (optional)
+                Format: [{"type": "figure", "number": "60.5"}, ...]
         """
+        if cross_references is None:
+            cross_references = []
+
+        # Serialize cross_references to JSON string for Neo4j storage
+        # Neo4j doesn't support lists of maps, only primitives or arrays of primitives
+        cross_references_json = json.dumps(cross_references)
+
         query = """
         MERGE (p:Paragraph {chunk_id: $chunk_id})
-        SET p.number = $paragraph_number, p.text = $text, p.page = $page, p.bounds = $bounds
+        SET p.number = $paragraph_number, p.text = $text, p.page = $page, p.bounds = $bounds,
+            p.cross_references = $cross_references
         WITH p
         OPTIONAL MATCH (parent)
         WHERE parent.id = $parent_id
@@ -188,6 +200,7 @@ class Neo4jStorage:
                 chunk_id=chunk_id,
                 page=page,
                 bounds=bounds,
+                cross_references=cross_references_json,
             )
 
     def upsert_table(
