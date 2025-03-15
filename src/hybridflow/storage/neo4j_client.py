@@ -298,6 +298,36 @@ class Neo4jStorage:
                 }
             return {}
 
+    def link_sequential_paragraphs(self, chapter_id: str) -> int:
+        """Create NEXT/PREV relationships between paragraphs in reading order.
+
+        Links paragraphs within the same parent (section/subsection/subsubsection)
+        in sequential order based on their paragraph numbers.
+
+        Args:
+            chapter_id: Chapter identifier to link paragraphs within
+
+        Returns:
+            Number of NEXT relationships created
+        """
+        query = """
+        MATCH (c:Chapter {id: $chapter_id})
+        MATCH (parent)-[:HAS_PARAGRAPH]->(p:Paragraph)
+        WHERE (c)-[:HAS_SECTION*0..1]->()-[:HAS_SUBSECTION*0..1]->()-[:HAS_SUBSUBSECTION*0..1]->(parent)
+        WITH parent, p
+        ORDER BY p.number
+        WITH parent, collect(p) as paragraphs
+        UNWIND range(0, size(paragraphs)-2) as i
+        WITH paragraphs[i] as current, paragraphs[i+1] as next
+        MERGE (current)-[:NEXT]->(next)
+        MERGE (next)-[:PREV]->(current)
+        RETURN count(*) as links_created
+        """
+        with self.driver.session() as session:
+            result = session.run(query, chapter_id=chapter_id)
+            record = result.single()
+            return record["links_created"] if record else 0
+
     def close(self) -> None:
         """Close the Neo4j driver connection."""
         self.driver.close()

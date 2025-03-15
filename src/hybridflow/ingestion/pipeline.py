@@ -245,9 +245,13 @@ class IngestionPipeline:
             # Upsert chapter metadata
             self.metadata_db.upsert_chapter(chapter)
 
+            # Link sequential paragraphs with NEXT/PREV relationships
+            chapter_id = f"{chapter.textbook_id.value}:ch{chapter.chapter_number}"
+            links_created = self.neo4j_storage.link_sequential_paragraphs(chapter_id)
+
             self.logger.info(
                 f"Successfully ingested {chapter.textbook_id.value}:{chapter.chapter_number} "
-                f"with {len(chunks)} chunks"
+                f"with {len(chunks)} chunks and {links_created} sequential links"
             )
 
             return {"status": "success", "chunks_inserted": len(chunks)}
