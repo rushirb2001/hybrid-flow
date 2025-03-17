@@ -21,7 +21,7 @@ class MetadataDatabase:
             database_path: Path to SQLite database file
         """
         self.engine = create_engine(f"sqlite:///{database_path}")
-        self.session_factory = sessionmaker(bind=self.engine)
+        self.session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
 
     def create_tables(self) -> None:
         """Create all database tables if they don't exist."""
@@ -93,6 +93,8 @@ class MetadataDatabase:
                 .filter_by(textbook_id=textbook_id, chapter_number=chapter_number)
                 .first()
             )
+            if result:
+                session.expunge(result)
             return result
         finally:
             session.close()
@@ -133,8 +135,6 @@ class MetadataDatabase:
                     existing.ingestion_timestamp = datetime.utcnow()
                     existing.source_file_path = chapter.source_file_path
                     session.commit()
-                    session.refresh(existing)
-                    # Make the object accessible outside the session
                     session.expunge(existing)
                     return existing
                 else:
@@ -153,7 +153,6 @@ class MetadataDatabase:
                 )
                 session.add(new_chapter)
                 session.commit()
-                session.refresh(new_chapter)
                 session.expunge(new_chapter)
                 return new_chapter
         finally:
