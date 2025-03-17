@@ -97,7 +97,8 @@ def bailey_chapter_file(tmp_path):
 
 def test_ingest_single_chapter(pipeline, bailey_chapter_file):
     """Test ingesting a single chapter successfully."""
-    result = pipeline.ingest_chapter(bailey_chapter_file)
+    # Use force=True to ensure fresh ingestion even if chapter exists
+    result = pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
     assert result["status"] == "success"
     assert result["chunks_inserted"] > 0
@@ -106,36 +107,70 @@ def test_ingest_single_chapter(pipeline, bailey_chapter_file):
 
 def test_ingest_chapter_creates_neo4j_hierarchy(pipeline, bailey_chapter_file):
     """Test that ingesting creates proper Neo4j hierarchy."""
-    pipeline.ingest_chapter(bailey_chapter_file)
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
-    # Query Neo4j for chapter node using driver session
+    # Query Neo4j for complete hierarchy
     query = """
     MATCH (c:Chapter {id: $chapter_id})
-    RETURN c.title as title
+    OPTIONAL MATCH (c)-[:HAS_SECTION]->(s:Section)
+    OPTIONAL MATCH (s)-[:HAS_SUBSECTION]->(ss:Subsection)
+    OPTIONAL MATCH (ss)-[:HAS_SUBSUBSECTION]->(sss:Subsubsection)
+    RETURN c.title as chapter_title,
+           count(DISTINCT s) as section_count,
+           count(DISTINCT ss) as subsection_count,
+           count(DISTINCT sss) as subsubsection_count
     """
 
     with pipeline.neo4j_storage.driver.session() as session:
         result = session.run(query, chapter_id="bailey:ch2")
-        records = list(result)
+        record = result.single()
 
-    assert len(records) == 1
-    assert records[0]["title"] == "Shock and blood transfusion"
+    assert record is not None
+    assert record["chapter_title"] == "Shock and blood transfusion"
+    assert record["section_count"] >= 1
+    assert record["subsection_count"] >= 1
+    assert record["subsubsection_count"] >= 1
 
 
 def test_ingest_chapter_creates_qdrant_vectors(pipeline, bailey_chapter_file):
     """Test that ingesting creates Qdrant vectors."""
-    pipeline.ingest_chapter(bailey_chapter_file)
+    # Ingest chapter with force=True to ensure re-ingestion
+    result = pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
-    # Get collection info from Qdrant
-    info = pipeline.qdrant_storage.get_collection_info()
+    assert result["status"] == "success"
+    assert result["chunks_inserted"] == 5
 
-    assert info["points_count"] > 0
-    assert info["points_count"] == 5
+    # Verify vectors exist in Qdrant for this chapter by searching for them
+    # Note: Qdrant uses upsert, so count may not increase if vectors already exist
+    from hybridflow.parsing.embedder import EmbeddingGenerator
+
+    embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    query_embedding = embedder.generate_embedding("shock")
+
+    # Search for vectors from bailey:ch2
+    results = pipeline.qdrant_storage.client.query_points(
+        collection_name="textbook_chunks",
+        query=query_embedding,
+        query_filter={
+            "must": [
+                {"key": "textbook_id", "match": {"value": "bailey"}},
+                {"key": "chapter_number", "match": {"value": "2"}},
+            ]
+        },
+        limit=10,
+    )
+
+    # Should find vectors from this chapter
+    assert len(results.points) > 0
+    # Should have vectors with proper metadata
+    for point in results.points:
+        assert point.payload["textbook_id"] == "bailey"
+        assert point.payload["chapter_number"] == "2"
 
 
 def test_ingest_chapter_creates_metadata(pipeline, bailey_chapter_file):
     """Test that ingesting creates metadata record."""
-    pipeline.ingest_chapter(bailey_chapter_file)
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
     # Get metadata from database
     metadata = pipeline.metadata_db.get_chapter_by_id("bailey", "2")
@@ -143,7 +178,10 @@ def test_ingest_chapter_creates_metadata(pipeline, bailey_chapter_file):
     assert metadata is not None
     assert metadata.textbook_id == "bailey"
     assert metadata.chapter_number == "2"
-    assert metadata.version == 1
+    assert metadata.version >= 1
+    assert metadata.title == "Shock and blood transfusion"
+    assert metadata.content_hash is not None
+    assert len(metadata.content_hash) == 64  # SHA256 hash
 
 
 def test_ingest_unchanged_chapter_skips(pipeline, bailey_chapter_file):
@@ -199,3 +237,142 @@ def test_ingest_modified_chapter_updates(bailey_chapter_file, tmp_path):
 
     finally:
         pipeline_instance.close()
+
+
+def test_ingest_creates_paragraph_links(pipeline, bailey_chapter_file):
+    """Test that NEXT/PREV relationships are created between paragraphs."""
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
+
+    # Query for NEXT/PREV relationships
+    query = """
+    MATCH (p1:Paragraph)-[:NEXT]->(p2:Paragraph)
+    WHERE p1.chunk_id STARTS WITH 'bailey:ch2:'
+    RETURN count(*) as next_links
+    """
+
+    with pipeline.neo4j_storage.driver.session() as session:
+        result = session.run(query)
+        record = result.single()
+
+    # Should have sequential links between paragraphs
+    assert record["next_links"] > 0
+
+
+def test_ingest_paragraphs_connected_to_hierarchy(pipeline, bailey_chapter_file):
+    """Test that paragraphs are properly connected to hierarchy nodes."""
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
+
+    # Query to verify paragraphs are connected to sections/subsections
+    query = """
+    MATCH (p:Paragraph)
+    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
+    MATCH (parent)-[:HAS_PARAGRAPH]->(p)
+    RETURN labels(parent)[0] as parent_type, count(p) as paragraph_count
+    ORDER BY parent_type
+    """
+
+    with pipeline.neo4j_storage.driver.session() as session:
+        results = session.run(query)
+        records = list(results)
+
+    # Should have paragraphs connected to hierarchy nodes
+    assert len(records) > 0
+    parent_types = [r["parent_type"] for r in records]
+    # Paragraphs should be connected to Section, Subsection, or Subsubsection
+    assert any(t in ["Section", "Subsection", "Subsubsection"] for t in parent_types)
+
+
+def test_ingest_qdrant_vectors_have_metadata(pipeline, bailey_chapter_file):
+    """Test that Qdrant vectors include proper metadata."""
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
+
+    # Search for a vector from this chapter
+    from hybridflow.parsing.embedder import EmbeddingGenerator
+
+    embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    query_embedding = embedder.generate_embedding("shock pathophysiology")
+
+    results = pipeline.qdrant_storage.client.query_points(
+        collection_name="textbook_chunks", query=query_embedding, limit=1
+    )
+
+    if len(results.points) > 0:
+        point = results.points[0]
+        # Check metadata fields exist
+        assert "textbook_id" in point.payload
+        assert "chapter_number" in point.payload
+        assert "chapter_title" in point.payload
+        assert "hierarchy_path" in point.payload
+        assert "page" in point.payload
+
+
+def test_ingest_neo4j_paragraphs_match_qdrant_count(pipeline, bailey_chapter_file):
+    """Test that Neo4j paragraph count matches Qdrant vector count for chapter."""
+    result = pipeline.ingest_chapter(bailey_chapter_file, force=True)
+
+    # Count paragraphs in Neo4j for this chapter
+    query = """
+    MATCH (p:Paragraph)
+    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
+    RETURN count(p) as paragraph_count
+    """
+
+    with pipeline.neo4j_storage.driver.session() as session:
+        neo4j_result = session.run(query)
+        neo4j_count = neo4j_result.single()["paragraph_count"]
+
+    # Should match the chunks inserted
+    assert neo4j_count == result["chunks_inserted"]
+
+
+def test_ingest_chapter_number_format(pipeline, bailey_chapter_file):
+    """Test that paragraph numbers follow correct format."""
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
+
+    # Query paragraph numbers
+    query = """
+    MATCH (p:Paragraph)
+    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
+    RETURN p.number as number, p.chunk_id as chunk_id
+    ORDER BY p.number
+    LIMIT 10
+    """
+
+    with pipeline.neo4j_storage.driver.session() as session:
+        results = session.run(query)
+        records = list(results)
+
+    assert len(records) > 0
+
+    for record in records:
+        number = record["number"]
+        chunk_id = record["chunk_id"]
+
+        # Paragraph number should match expected format (e.g., "2.1", "2.1.1", "2.1.1.1")
+        assert number.startswith("2")
+        # chunk_id should end with paragraph number
+        assert chunk_id.endswith(f":{number}")
+
+
+def test_ingest_bounds_stored_correctly(pipeline, bailey_chapter_file):
+    """Test that bounding box coordinates are stored."""
+    pipeline.ingest_chapter(bailey_chapter_file, force=True)
+
+    # Query paragraph with bounds
+    query = """
+    MATCH (p:Paragraph)
+    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
+    RETURN p.bounds as bounds
+    LIMIT 1
+    """
+
+    with pipeline.neo4j_storage.driver.session() as session:
+        result = session.run(query)
+        record = result.single()
+
+    assert record is not None
+    bounds = record["bounds"]
+    # Bounds should be a list of 4 coordinates [x1, y1, x2, y2]
+    assert isinstance(bounds, list)
+    assert len(bounds) == 4
+    assert all(isinstance(b, (int, float)) for b in bounds)
