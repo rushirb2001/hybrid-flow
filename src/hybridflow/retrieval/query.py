@@ -2,11 +2,13 @@
 
 import json
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
+
+from hybridflow.models import ExpansionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,7 @@ class QueryEngine:
         self,
         query_text: str,
         limit: int = 5,
+        expansion_config: Optional[Union[ExpansionConfig, dict]] = None,
         expand_context: bool = True,
         expand_paragraphs: bool = False,
         before_count: int = 2,
@@ -142,16 +145,34 @@ class QueryEngine:
         Args:
             query_text: Query string
             limit: Maximum number of results
-            expand_context: Whether to expand results with full hierarchical context
-            expand_paragraphs: Whether to expand results with surrounding paragraphs
-            before_count: Number of paragraphs to retrieve before each result (if expand_paragraphs=True)
-            after_count: Number of paragraphs to retrieve after each result (if expand_paragraphs=True)
-            include_section_context: Whether to include parent section summary (TASK 2.3)
-            include_references: Whether to include referenced figures/tables (TASK 3.3)
+            expansion_config: Optional ExpansionConfig object or dict to configure all expansion settings.
+                            If provided, takes precedence over individual parameters.
+            expand_context: Whether to expand results with full hierarchical context (deprecated, use expansion_config)
+            expand_paragraphs: Whether to expand results with surrounding paragraphs (deprecated, use expansion_config)
+            before_count: Number of paragraphs to retrieve before each result (deprecated, use expansion_config)
+            after_count: Number of paragraphs to retrieve after each result (deprecated, use expansion_config)
+            include_section_context: Whether to include parent section summary (deprecated, use expansion_config)
+            include_references: Whether to include referenced figures/tables (deprecated, use expansion_config)
 
         Returns:
             List of results with text, score, and optional hierarchical context, surrounding paragraphs, and references
         """
+        # TASK 5.2: Support ExpansionConfig while maintaining backward compatibility
+        if expansion_config is not None:
+            # If dict provided, convert to ExpansionConfig
+            if isinstance(expansion_config, dict):
+                config = ExpansionConfig(**expansion_config)
+            else:
+                config = expansion_config
+
+            # Extract parameters from config
+            expand_context = config.expand_context
+            expand_paragraphs = config.expand_paragraphs
+            before_count = config.before_count
+            after_count = config.after_count
+            include_section_context = config.include_section_context
+            include_references = config.include_references
+
         search_results = self.semantic_search(query_text, limit=limit)
 
         if expand_context:
@@ -763,6 +784,57 @@ class QueryEngine:
                     "total": figure_count + table_count,
                 },
             }
+
+    def format_citation(self, result: Dict) -> str:
+        """Format a search result as a citation.
+
+        Args:
+            result: Search result dictionary
+
+        Returns:
+            Formatted citation string (e.g., "Bailey & Love, Ch 60, Section 2.4, p. 1025")
+        """
+        # Map textbook IDs to proper names
+        textbook_names = {
+            "bailey": "Bailey & Love",
+            "sabiston": "Sabiston",
+            "schwartz": "Schwartz",
+        }
+
+        parts = []
+
+        # Add textbook name
+        textbook_id = result.get("textbook_id", "")
+        if textbook_id:
+            textbook_name = textbook_names.get(textbook_id, textbook_id.title())
+            parts.append(textbook_name)
+
+        # Add chapter number
+        chapter_number = result.get("chapter_number")
+        if chapter_number:
+            parts.append(f"Ch {chapter_number}")
+
+        # Add section number from chunk_id if available
+        chunk_id = result.get("chunk_id", "")
+        if chunk_id and ":" in chunk_id:
+            # Extract paragraph number which contains section info
+            # Format: bailey:ch60:2.4.1 -> section 2.4, paragraph 1
+            id_parts = chunk_id.split(":")
+            if len(id_parts) >= 3:
+                paragraph_num = id_parts[2]
+                # Get section number (first two parts of paragraph number)
+                if "." in paragraph_num:
+                    section_parts = paragraph_num.split(".")
+                    if len(section_parts) >= 2:
+                        section_num = f"{section_parts[0]}.{section_parts[1]}"
+                        parts.append(f"Section {section_num}")
+
+        # Add page number
+        page = result.get("page")
+        if page:
+            parts.append(f"p. {page}")
+
+        return ", ".join(parts) if parts else "Unknown source"
 
     def close(self):
         """Close connections."""

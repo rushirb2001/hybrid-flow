@@ -14,6 +14,99 @@ class TextbookEnum(str, Enum):
     SCHWARTZ = "schwartz"
 
 
+class ExpansionConfig(BaseModel):
+    """Configuration for context expansion in hybrid search.
+
+    This class encapsulates all parameters that control how search results
+    are expanded with additional context (hierarchy, siblings, references, etc.).
+    """
+
+    expand_context: bool = Field(
+        default=True,
+        description="Whether to expand results with hierarchical context",
+    )
+    expand_paragraphs: bool = Field(
+        default=False,
+        description="Whether to expand results with surrounding paragraphs",
+    )
+    before_count: int = Field(
+        default=2,
+        description="Number of paragraphs to retrieve before each result",
+    )
+    after_count: int = Field(
+        default=2,
+        description="Number of paragraphs to retrieve after each result",
+    )
+    include_section_context: bool = Field(
+        default=False,
+        description="Whether to include parent section summary",
+    )
+    include_references: bool = Field(
+        default=False,
+        description="Whether to include referenced figures/tables",
+    )
+
+    @classmethod
+    def minimal(cls) -> "ExpansionConfig":
+        """Create minimal expansion config (only basic context).
+
+        Returns:
+            ExpansionConfig with minimal expansion
+        """
+        return cls(
+            expand_context=True,
+            expand_paragraphs=False,
+            include_section_context=False,
+            include_references=False,
+        )
+
+    @classmethod
+    def standard(cls) -> "ExpansionConfig":
+        """Create standard expansion config (context + surrounding paragraphs).
+
+        Returns:
+            ExpansionConfig with standard expansion
+        """
+        return cls(
+            expand_context=True,
+            expand_paragraphs=True,
+            before_count=1,
+            after_count=1,
+            include_section_context=False,
+            include_references=False,
+        )
+
+    @classmethod
+    def comprehensive(cls) -> "ExpansionConfig":
+        """Create comprehensive expansion config (all features enabled).
+
+        Returns:
+            ExpansionConfig with comprehensive expansion
+        """
+        return cls(
+            expand_context=True,
+            expand_paragraphs=True,
+            before_count=2,
+            after_count=2,
+            include_section_context=True,
+            include_references=True,
+        )
+
+    @classmethod
+    def none(cls) -> "ExpansionConfig":
+        """Create no-expansion config (only basic search results).
+
+        Returns:
+            ExpansionConfig with no expansion
+        """
+        return cls(
+            expand_context=False,
+            expand_paragraphs=False,
+            include_section_context=False,
+            include_references=False,
+        )
+
+
 class Bounds(BaseModel):
     """Bounding box coordinates for content location."""
 

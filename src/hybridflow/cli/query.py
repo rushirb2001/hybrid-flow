@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
 
+from hybridflow.models import ExpansionConfig
 from hybridflow.retrieval.query import QueryEngine
 
 load_dotenv()
@@ -48,10 +49,40 @@ def cmd_search(args: argparse.Namespace) -> int:
             neo4j_driver=neo4j_driver,
         )
 
+        # TASK 5.3: Determine expansion config based on CLI flags
+        expansion_config = None
+
+        if hasattr(args, "custom_expand") and args.custom_expand:
+            # Parse custom JSON expansion config
+            try:
+                custom_dict = json.loads(args.custom_expand)
+                expansion_config = ExpansionConfig(**custom_dict)
+            except json.JSONDecodeError as e:
+                logging.error(f"Invalid JSON in --custom-expand: {e}")
+                return 1
+            except Exception as e:
+                logging.error(f"Invalid expansion config: {e}")
+                return 1
+        elif hasattr(args, "expand") and args.expand:
+            # Use preset expansion levels
+            expand_level = args.expand.lower()
+            if expand_level == "none":
+                expansion_config = ExpansionConfig.none()
+            elif expand_level == "minimal":
+                expansion_config = ExpansionConfig.minimal()
+            elif expand_level == "standard":
+                expansion_config = ExpansionConfig.standard()
+            elif expand_level == "comprehensive":
+                expansion_config = ExpansionConfig.comprehensive()
+            else:
+                logging.error(f"Unknown expansion level: {expand_level}")
+                return 1
+
         results = engine.hybrid_search(
             query_text=args.query,
             limit=args.limit,
-            expand_context=True,
+            expansion_config=expansion_config,
+            expand_context=True if expansion_config is None else None,
         )
 
         if not results:
@@ -63,12 +94,29 @@ def cmd_search(args: argparse.Namespace) -> int:
         for i, result in enumerate(results, 1):
             print(f"Result {i}:")
             print(f"  Score: {result['score']:.4f}")
-            print(f"  Textbook: {result.get('textbook_id', 'N/A')}")
-            print(f"  Chapter: {result.get('chapter_number', 'N/A')}")
-            print(f"  Page: {result.get('page', 'N/A')}")
+
+            # TASK 4.2: Display formatted citation
+            citation = engine.format_citation(result)
+            print(f"  Citation: {citation}")
 
             if "hierarchy" in result:
                 print(f"  Hierarchy: {result['hierarchy']}")
+
+            # Show expansion metadata if present
+            if "expanded_context" in result:
+                meta = result["expanded_context"].get("expansion_metadata", {})
+                before = meta.get("before_count", 0)
+                after = meta.get("after_count", 0)
+                print(f"  Expansion: {before} before, {after} after")
+
+            if "section_context" in result:
+                print(f"  Section context: included")
+
+            if "referenced_content" in result:
+                refs = result["referenced_content"].get("references", [])
+                if refs:
+                    counts = result["referenced_content"]["counts"]
+                    print(f"  References: {counts['total']} total ({counts['figures']} figures, {counts['tables']} tables)")
 
             text = result.get("full_text") or result.get("text", "")
             if text:
@@ -163,6 +211,17 @@ def add_query_commands(subparsers):
     )
     parser_search.add_argument(
         "-v", "--verbose", action="store_true", help="Verbose output"
+    )
+    parser_search.add_argument(
+        "--expand",
+        choices=["none", "minimal", "standard", "comprehensive"],
+        help="Expansion level: none (basic results), minimal (hierarchy only), "
+             "standard (hierarchy + siblings), comprehensive (all features)",
+    )
+    parser_search.add_argument(
+        "--custom-expand",
+        type=str,
+        help='Custom expansion config as JSON (e.g., \'{"expand_context": true, "include_references": true}\')',
     )
     parser_search.set_defaults(func=cmd_search)
 
