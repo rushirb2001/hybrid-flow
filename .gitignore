@@ -150,6 +150,7 @@ cython_debug/
 .db-journal
 data/
 data/*/
+backups/
 logs/
 .cache/
 temp/
