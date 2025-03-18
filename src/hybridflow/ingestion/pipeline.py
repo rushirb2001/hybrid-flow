@@ -1,9 +1,12 @@
 """Ingestion pipeline orchestrating all storage and processing components."""
 
 import hashlib
+import json
 import logging
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from hybridflow.models import Chapter
 from hybridflow.parsing.chunk_generator import ChunkGenerator
@@ -12,6 +15,78 @@ from hybridflow.storage.metadata_db import MetadataDatabase
 from hybridflow.storage.neo4j_client import Neo4jStorage
 from hybridflow.storage.qdrant_client import QdrantStorage
 from hybridflow.validation.loader import JSONLoader
+
+
+class IngestionTransaction:
+    """Transaction context manager for ingestion operations with validation."""
+
+    def __init__(self, pipeline: "IngestionPipeline", description: str = "") -> None:
+        """Initialize ingestion transaction.
+
+        Args:
+            pipeline: The parent IngestionPipeline instance
+            description: Optional description of this transaction
+        """
+        self.pipeline = pipeline
+        self.description = description
+        self.version_id = None
+        self.started = False
+        self.committed = False
+        self.operations = []
+
+    def __enter__(self) -> "IngestionTransaction":
+        """Start the transaction and generate version ID.
+
+        Returns:
+            Self for context manager usage
+        """
+        self.version_id = self.pipeline._generate_version_id("staging")
+        self.started = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Exit transaction with validation and commit/rollback.
+
+        Args:
+            exc_type: Exception type if raised
+            exc_val: Exception value if raised
+            exc_tb: Exception traceback if raised
+
+        Returns:
+            False to propagate exceptions, True to suppress
+        """
+        # Handle exceptions - rollback and propagate
+        if exc_type is not None:
+            self.pipeline._rollback_version(self.version_id, error=str(exc_val))
+            return False
+
+        # Validate ingestion before committing
+        validation = self.pipeline._validate_ingestion(self.version_id)
+        if validation["status"] == "pass":
+            self.pipeline._commit_version(self.version_id)
+            self.committed = True
+        else:
+            self.pipeline._rollback_version(self.version_id, error=validation["errors"])
+            raise ValueError(f"Validation failed: {validation['errors']}")
+
+        return False
+
+    def track_operation(self, operation_type: str, entity_id: str, status: str) -> None:
+        """Track an operation within this transaction.
+
+        Args:
+            operation_type: Type of operation (e.g., 'upsert_chapter', 'generate_embedding')
+            entity_id: Identifier for the entity being operated on
+            status: Status of the operation ('success', 'failed', 'pending')
+        """
+        self.operations.append(
+            {
+                "type": operation_type,
+                "entity": entity_id,
+                "status": status,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
 
 
 class IngestionPipeline:
@@ -300,6 +375,128 @@ class IngestionPipeline:
         )
 
         return results
+
+    def _generate_version_id(self, prefix: str = "v") -> str:
+        """Generate a unique version ID with timestamp.
+
+        Args:
+            prefix: Prefix for the version ID (default: 'v')
+
+        Returns:
+            Formatted version ID string (e.g., 'v20250318_143025')
+        """
+        return f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    def _create_staging_environment(self, version_id: str) -> Dict[str, bool]:
+        """Create staging environment across all storage systems.
+
+        Args:
+            version_id: The version ID for this staging environment
+
+        Returns:
+            Dict with success status for each storage system
+
+        Raises:
+            RuntimeError: If staging creation fails
+        """
+        results = {"sqlite": False, "qdrant": False, "neo4j": False}
+
+        # Create SQLite staging snapshot
+        try:
+            self.metadata_db.create_snapshot(version_id)
+            results["sqlite"] = True
+        except Exception as e:
+            raise RuntimeError(f"SQLite staging failed: {e}")
+
+        # Create Qdrant staging collection
+        try:
+            self.qdrant_storage.create_snapshot(version_id, show_progress=False)
+            results["qdrant"] = True
+        except Exception as e:
+            self.metadata_db.delete_snapshot(version_id)
+            raise RuntimeError(f"Qdrant staging failed: {e}")
+
+        # Neo4j staging uses labels during upsert (no pre-creation needed)
+        results["neo4j"] = True
+
+        # Update version registry with Qdrant and Neo4j snapshot info
+        # (SQLite snapshot was already registered by create_snapshot)
+        with self.metadata_db.engine.connect() as conn:
+            from sqlalchemy import text
+
+            conn.execute(
+                text("""
+                    UPDATE version_registry
+                    SET qdrant_snapshot = :qdrant_snapshot,
+                        neo4j_snapshot = :neo4j_snapshot,
+                        description = :description,
+                        updated_at = :updated_at
+                    WHERE version_id = :version_id
+                """),
+                {
+                    "qdrant_snapshot": f"textbook_chunks_{version_id}",
+                    "neo4j_snapshot": f"v{version_id}",
+                    "description": f"Staging environment for {version_id}",
+                    "updated_at": datetime.now().isoformat(),
+                    "version_id": version_id,
+                },
+            )
+            conn.commit()
+
+        return results
+
+    def _cleanup_staging_environment(self, version_id: str) -> None:
+        """Cleanup staging environment artifacts.
+
+        Args:
+            version_id: The version ID to cleanup
+        """
+        # Delete all staging artifacts (ignore failures)
+        try:
+            self.metadata_db.delete_snapshot(version_id)
+        except:
+            pass
+
+        try:
+            self.qdrant_storage.delete_snapshot(version_id)
+        except:
+            pass
+
+        try:
+            self.neo4j_storage.delete_snapshot(version_id)
+        except:
+            pass
+
+    def _validate_ingestion(self, version_id: str) -> Dict[str, Any]:
+        """Validate ingestion for a specific version.
+
+        Args:
+            version_id: The version ID to validate
+
+        Returns:
+            Validation result dict with 'status' and optional 'errors'
+        """
+        # Placeholder - will be implemented in future phases
+        return {"status": "pass", "errors": []}
+
+    def _commit_version(self, version_id: str) -> None:
+        """Commit a validated version to production.
+
+        Args:
+            version_id: The version ID to commit
+        """
+        # Placeholder - will be implemented in future phases
+        self.logger.info(f"Committing version {version_id}")
+
+    def _rollback_version(self, version_id: str, error: str = "") -> None:
+        """Rollback a failed version and cleanup.
+
+        Args:
+            version_id: The version ID to rollback
+            error: Error message or details
+        """
+        # Placeholder - will be implemented in future phases
+        self.logger.warning(f"Rolling back version {version_id}: {error}")
 
     def close(self) -> None:
         """Close all storage client connections."""
