@@ -2,7 +2,7 @@
 
 import hashlib
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
@@ -70,6 +70,9 @@ class MetadataDatabase:
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_operation_log_status ON operation_log(status)"))
 
             conn.commit()
+
+        # Run ingestion_log schema migration
+        self.migrate_ingestion_log_schema()
 
     def get_chapter_by_id(
         self, textbook_id: str, chapter_number: str
@@ -163,6 +166,13 @@ class MetadataDatabase:
         parsing_strategy: str,
         error_message: Optional[str],
         chunks_inserted: int,
+        version_id: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        chunks_before: Optional[int] = None,
+        chunks_after: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        metadata_json: Optional[str] = None,
+        diff_json: Optional[str] = None,
     ) -> None:
         """Log an ingestion operation.
 
@@ -172,20 +182,43 @@ class MetadataDatabase:
             parsing_strategy: Strategy used for parsing
             error_message: Error message if failed
             chunks_inserted: Number of chunks successfully inserted
+            version_id: Optional version identifier for this operation
+            operation_type: Optional type of operation (insert, update, delete)
+            chunks_before: Optional count of chunks before operation
+            chunks_after: Optional count of chunks after operation
+            duration_ms: Optional duration in milliseconds
+            metadata_json: Optional metadata as JSON string
+            diff_json: Optional diff information as JSON string
         """
-        session = self.session_factory()
-        try:
-            log_entry = IngestionLog(
-                chapter_id=chapter_id,
-                status=status,
-                parsing_strategy=parsing_strategy,
-                error_message=error_message,
-                chunks_inserted=chunks_inserted,
+        with self.engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO ingestion_log
+                    (chapter_id, timestamp, status, parsing_strategy, error_message,
+                     chunks_inserted, version_id, operation_type, chunks_before,
+                     chunks_after, duration_ms, metadata_json, diff_json)
+                    VALUES (:chapter_id, :timestamp, :status, :parsing_strategy,
+                            :error_message, :chunks_inserted, :version_id,
+                            :operation_type, :chunks_before, :chunks_after,
+                            :duration_ms, :metadata_json, :diff_json)
+                """),
+                {
+                    "chapter_id": chapter_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "status": status,
+                    "parsing_strategy": parsing_strategy,
+                    "error_message": error_message,
+                    "chunks_inserted": chunks_inserted,
+                    "version_id": version_id,
+                    "operation_type": operation_type,
+                    "chunks_before": chunks_before,
+                    "chunks_after": chunks_after,
+                    "duration_ms": duration_ms,
+                    "metadata_json": metadata_json,
+                    "diff_json": diff_json,
+                },
             )
-            session.add(log_entry)
-            session.commit()
-        finally:
-            session.close()
+            conn.commit()
 
     def get_aggregate_stats(self) -> Dict:
         """Compute aggregate statistics across all chapters.
@@ -275,3 +308,360 @@ class MetadataDatabase:
             conn.commit()
 
         return version_id
+
+    def migrate_ingestion_log_schema(self) -> None:
+        """Migrate ingestion_log table to add versioning columns."""
+        with self.engine.connect() as conn:
+            # Add new columns to ingestion_log table
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN version_id TEXT"))
+            except Exception:
+                pass  # Column may already exist
+
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN operation_type TEXT"))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN chunks_before INTEGER"))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN chunks_after INTEGER"))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN duration_ms INTEGER"))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN metadata_json TEXT"))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN diff_json TEXT"))
+            except Exception:
+                pass
+
+            conn.commit()
+
+    def create_snapshot(self, version_id: str) -> None:
+        """Create a snapshot of the current chapter_metadata table.
+
+        Args:
+            version_id: Version identifier for this snapshot
+        """
+        # Baseline uses existing table, no copy needed
+        if "baseline" in version_id:
+            return
+
+        with self.engine.connect() as conn:
+            # Create snapshot table
+            snapshot_table = f"chapter_metadata_{version_id}"
+            conn.execute(
+                text(f"CREATE TABLE IF NOT EXISTS {snapshot_table} AS SELECT * FROM chapter_metadata")
+            )
+
+            # Insert snapshot record into version_registry
+            conn.execute(
+                text("""
+                    INSERT OR IGNORE INTO version_registry
+                    (version_id, timestamp, status, description, sqlite_snapshot)
+                    VALUES (:version_id, :timestamp, 'pending', :description, :sqlite_snapshot)
+                """),
+                {
+                    "version_id": version_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "description": f"Snapshot created for {version_id}",
+                    "sqlite_snapshot": snapshot_table,
+                },
+            )
+
+            conn.commit()
+
+    def restore_snapshot(self, version_id: str) -> None:
+        """Restore chapter_metadata from a snapshot.
+
+        Args:
+            version_id: Version identifier to restore from
+        """
+        snapshot_table = f"chapter_metadata_{version_id}"
+
+        with self.engine.connect() as conn:
+            # Check if snapshot table exists
+            result = conn.execute(
+                text("""
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND name=:table_name
+                """),
+                {"table_name": snapshot_table},
+            ).fetchone()
+
+            if not result:
+                raise ValueError(f"Snapshot table {snapshot_table} does not exist")
+
+            # Restore data from snapshot
+            conn.execute(text("DELETE FROM chapter_metadata"))
+            conn.execute(
+                text(f"INSERT INTO chapter_metadata SELECT * FROM {snapshot_table}")
+            )
+
+            # Update version_registry status
+            conn.execute(
+                text("""
+                    UPDATE version_registry
+                    SET status='restored', updated_at=:updated_at
+                    WHERE version_id=:version_id
+                """),
+                {
+                    "updated_at": datetime.now().isoformat(),
+                    "version_id": version_id,
+                },
+            )
+
+            conn.commit()
+
+    def delete_snapshot(self, version_id: str) -> None:
+        """Delete a snapshot table.
+
+        Args:
+            version_id: Version identifier to delete
+
+        Raises:
+            ValueError: If attempting to delete baseline version
+        """
+        # Prevent deletion of baseline
+        if "baseline" in version_id:
+            raise ValueError("Cannot delete baseline version")
+
+        snapshot_table = f"chapter_metadata_{version_id}"
+
+        with self.engine.connect() as conn:
+            # Drop snapshot table
+            conn.execute(text(f"DROP TABLE IF EXISTS {snapshot_table}"))
+
+            # Update version_registry status
+            conn.execute(
+                text("""
+                    UPDATE version_registry
+                    SET status='archived', updated_at=:updated_at
+                    WHERE version_id=:version_id
+                """),
+                {
+                    "updated_at": datetime.now().isoformat(),
+                    "version_id": version_id,
+                },
+            )
+
+            conn.commit()
+
+    def list_snapshots(self) -> List[str]:
+        """List all snapshot version IDs.
+
+        Returns:
+            List of version identifiers for existing snapshots
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                text("""
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND name LIKE 'chapter_metadata_v%'
+                    ORDER BY name
+                """)
+            ).fetchall()
+
+            # Extract version_ids from table names
+            version_ids = [
+                row[0].replace("chapter_metadata_", "") for row in result
+            ]
+
+            return version_ids
+
+    def register_version(
+        self,
+        version_id: str,
+        description: str,
+        sqlite_snapshot: str = "",
+        qdrant_snapshot: str = "",
+        neo4j_snapshot: str = "",
+    ) -> None:
+        """Register a new version in the version registry.
+
+        Args:
+            version_id: Unique version identifier
+            description: Description of this version
+            sqlite_snapshot: Path or name of SQLite snapshot
+            qdrant_snapshot: Path or name of Qdrant snapshot
+            neo4j_snapshot: Path or name of Neo4j snapshot
+
+        Example:
+            >>> db.register_version(
+            ...     'v2_minor_20251225_120000',
+            ...     'Added new chapter from Schwartz',
+            ...     sqlite_snapshot='chapter_metadata_v2_minor_20251225_120000',
+            ...     qdrant_snapshot='textbook_chunks_v2',
+            ...     neo4j_snapshot='v2_minor_20251225_120000'
+            ... )
+        """
+        with self.engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO version_registry
+                    (version_id, timestamp, status, description, sqlite_snapshot, qdrant_snapshot, neo4j_snapshot)
+                    VALUES (:version_id, :timestamp, 'pending', :description, :sqlite_snapshot, :qdrant_snapshot, :neo4j_snapshot)
+                """),
+                {
+                    "version_id": version_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "description": description,
+                    "sqlite_snapshot": sqlite_snapshot,
+                    "qdrant_snapshot": qdrant_snapshot,
+                    "neo4j_snapshot": neo4j_snapshot,
+                },
+            )
+            conn.commit()
+
+    def update_version_status(self, version_id: str, status: str) -> None:
+        """Update the status of a version.
+
+        Args:
+            version_id: Version identifier to update
+            status: New status (pending, staging, validating, committed, rolled_back, archived)
+
+        Example:
+            >>> db.update_version_status('v2_minor_20251225_120000', 'committed')
+        """
+        with self.engine.connect() as conn:
+            conn.execute(
+                text("""
+                    UPDATE version_registry
+                    SET status=:status, updated_at=:updated_at
+                    WHERE version_id=:version_id
+                """),
+                {
+                    "status": status,
+                    "updated_at": datetime.now().isoformat(),
+                    "version_id": version_id,
+                },
+            )
+            conn.commit()
+
+    def log_operation(
+        self,
+        version_id: str,
+        operation_type: str,
+        system: str,
+        entity_type: str,
+        entity_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+        diff_json: Optional[str] = None,
+        metadata_json: Optional[str] = None,
+    ) -> None:
+        """Log an operation in the operation log.
+
+        Args:
+            version_id: Version identifier this operation belongs to
+            operation_type: Type of operation (insert, update, delete, snapshot, restore)
+            system: System where operation occurred (sqlite, qdrant, neo4j)
+            entity_type: Type of entity (chapter, paragraph, collection, label)
+            entity_id: Identifier of the entity
+            status: Operation status (success, failure, partial)
+            error_message: Error message if operation failed
+            duration_ms: Duration in milliseconds
+            diff_json: JSON string containing diff information
+            metadata_json: JSON string containing additional metadata
+
+        Example:
+            >>> db.log_operation(
+            ...     version_id='v2_minor_20251225_120000',
+            ...     operation_type='insert',
+            ...     system='qdrant',
+            ...     entity_type='paragraph',
+            ...     entity_id='bailey:ch60:60.1.1',
+            ...     status='success',
+            ...     duration_ms=150
+            ... )
+        """
+        with self.engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO operation_log
+                    (version_id, timestamp, operation_type, system, entity_type, entity_id,
+                     status, error_message, duration_ms, diff_json, metadata_json)
+                    VALUES (:version_id, :timestamp, :operation_type, :system, :entity_type, :entity_id,
+                            :status, :error_message, :duration_ms, :diff_json, :metadata_json)
+                """),
+                {
+                    "version_id": version_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "operation_type": operation_type,
+                    "system": system,
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "status": status,
+                    "error_message": error_message,
+                    "duration_ms": duration_ms,
+                    "diff_json": diff_json,
+                    "metadata_json": metadata_json,
+                },
+            )
+            conn.commit()
+
+    def get_version_history(self, limit: int = 10) -> List[Dict]:
+        """Get version history from the registry.
+
+        Args:
+            limit: Maximum number of versions to return
+
+        Returns:
+            List of dictionaries containing version information
+
+        Example:
+            >>> history = db.get_version_history(limit=5)
+            >>> for version in history:
+            ...     print(f"{version['version_id']}: {version['status']}")
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                text("""
+                    SELECT * FROM version_registry
+                    ORDER BY timestamp DESC
+                    LIMIT :limit
+                """),
+                {"limit": limit},
+            ).fetchall()
+
+            # Convert rows to dictionaries
+            if result:
+                columns = result[0]._fields
+                return [dict(zip(columns, row)) for row in result]
+            return []
+
+    def get_latest_version(self) -> Optional[str]:
+        """Get the latest committed version ID.
+
+        Returns:
+            Version ID of the latest committed version, or None if no committed versions exist
+
+        Example:
+            >>> latest = db.get_latest_version()
+            >>> print(f"Latest committed version: {latest}")
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                text("""
+                    SELECT version_id FROM version_registry
+                    WHERE status='committed'
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """)
+            ).fetchone()
+
+            return result[0] if result else None
