@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime
 from typing import Dict, Optional
 
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 
 from hybridflow.models import Chapter
@@ -26,6 +26,50 @@ class MetadataDatabase:
     def create_tables(self) -> None:
         """Create all database tables if they don't exist."""
         Base.metadata.create_all(self.engine)
+
+        # Create versioning infrastructure tables
+        with self.engine.connect() as conn:
+            # Create version_registry table
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS version_registry (
+                    version_id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    description TEXT,
+                    commit_hash TEXT,
+                    sqlite_snapshot TEXT,
+                    qdrant_snapshot TEXT,
+                    neo4j_snapshot TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+
+            # Create operation_log table
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS operation_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    system TEXT NOT NULL,
+                    entity_type TEXT,
+                    entity_id TEXT,
+                    status TEXT NOT NULL,
+                    error_message TEXT,
+                    duration_ms INTEGER,
+                    diff_json TEXT,
+                    metadata_json TEXT,
+                    FOREIGN KEY (version_id) REFERENCES version_registry(version_id)
+                )
+            """))
+
+            # Create indexes for operation_log
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_operation_log_version ON operation_log(version_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_operation_log_timestamp ON operation_log(timestamp)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_operation_log_status ON operation_log(status)"))
+
+            conn.commit()
 
     def get_chapter_by_id(
         self, textbook_id: str, chapter_number: str
@@ -186,3 +230,48 @@ class MetadataDatabase:
             }
         finally:
             session.close()
+
+    def register_baseline_version(
+        self, description: str = "Initial baseline from existing data"
+    ) -> str:
+        """Register existing data as baseline version v1.
+
+        Args:
+            description: Description of the baseline version
+
+        Returns:
+            version_id: The generated baseline version identifier
+        """
+        # Generate baseline version_id with timestamp
+        version_id = f"v1_baseline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        with self.engine.connect() as conn:
+            # Insert baseline version into version_registry
+            conn.execute(
+                text("""
+                    INSERT INTO version_registry
+                    (version_id, timestamp, status, description, sqlite_snapshot, qdrant_snapshot, neo4j_snapshot)
+                    VALUES (:version_id, :timestamp, 'committed', :description, 'baseline', 'baseline', 'baseline')
+                """),
+                {
+                    "version_id": version_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "description": description,
+                },
+            )
+
+            # Add baseline_version_id column to chapter_metadata
+            conn.execute(
+                text("ALTER TABLE chapter_metadata ADD COLUMN baseline_version_id TEXT")
+            )
+
+            # Update all existing chapters with baseline version_id
+            conn.execute(
+                text("UPDATE chapter_metadata SET baseline_version_id = :version_id"),
+                {"version_id": version_id},
+            )
+
+            # Commit transaction
+            conn.commit()
+
+        return version_id
