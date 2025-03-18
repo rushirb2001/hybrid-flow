@@ -547,8 +547,72 @@ class IngestionPipeline:
         Args:
             version_id: The version ID to commit
         """
-        # Placeholder - will be implemented in future phases
-        self.logger.info(f"Committing version {version_id}")
+        # Update version status to committing
+        self.metadata_db.update_version_status(version_id, "committing")
+
+        # Restore SQLite from staging snapshot
+        self.metadata_db.restore_snapshot(version_id)
+
+        # Update Qdrant alias to point to new version
+        self.qdrant_storage.restore_snapshot(version_id)
+
+        # For Neo4j, nodes already created with version label during ingestion
+        # No additional action needed for commit
+
+        # Rotate old versions
+        self._rotate_versions()
+
+        # Update version status to committed
+        self.metadata_db.update_version_status(version_id, "committed")
+
+        # Log commit operation
+        self.metadata_db.log_operation(
+            version_id, "commit", "pipeline", "version", version_id, "success"
+        )
+
+        self.logger.info(f"Successfully committed version {version_id}")
+
+    def _rotate_versions(self, keep_count: int = 5) -> None:
+        """Rotate old versions by archiving versions beyond keep_count.
+
+        Args:
+            keep_count: Number of committed versions to keep (default: 5)
+        """
+        # Get version history
+        history = self.metadata_db.get_version_history(limit=100)
+
+        # Filter committed versions excluding baseline
+        committed = [
+            v
+            for v in history
+            if v["status"] == "committed" and "baseline" not in v["version_id"]
+        ]
+
+        # If more than keep_count, delete oldest
+        if len(committed) > keep_count:
+            to_delete = committed[keep_count:]
+            for version in to_delete:
+                version_id = version["version_id"]
+                self.logger.info(f"Archiving old version: {version_id}")
+
+                # Delete snapshots from all storage systems (ignore errors for missing snapshots)
+                try:
+                    self.metadata_db.delete_snapshot(version_id)
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete SQLite snapshot {version_id}: {e}")
+
+                try:
+                    self.qdrant_storage.delete_snapshot(version_id)
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete Qdrant snapshot {version_id}: {e}")
+
+                try:
+                    self.neo4j_storage.delete_snapshot(version_id)
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete Neo4j snapshot {version_id}: {e}")
+
+                # Update version status to archived
+                self.metadata_db.update_version_status(version_id, "archived")
 
     def _rollback_version(self, version_id: str, error: str = "") -> None:
         """Rollback a failed version and cleanup.
