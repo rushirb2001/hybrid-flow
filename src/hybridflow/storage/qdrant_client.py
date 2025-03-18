@@ -522,11 +522,13 @@ class QdrantStorage:
             'valid'
         """
         # Determine collection name
-        collection_name = (
-            self._get_versioned_collection_name(version_id)
-            if version_id
-            else self.collection_name
-        )
+        # Baseline uses the main collection, not a versioned one
+        if version_id and "baseline" in version_id:
+            collection_name = self.collection_name
+        elif version_id:
+            collection_name = self._get_versioned_collection_name(version_id)
+        else:
+            collection_name = self.collection_name
 
         # Get collection info
         info = self.client.get_collection(collection_name)

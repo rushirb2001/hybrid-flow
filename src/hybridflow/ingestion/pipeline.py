@@ -474,10 +474,72 @@ class IngestionPipeline:
             version_id: The version ID to validate
 
         Returns:
-            Validation result dict with 'status' and optional 'errors'
+            Validation result dict with 'status', 'checks', and 'errors'
         """
-        # Placeholder - will be implemented in future phases
-        return {"status": "pass", "errors": []}
+        # Initialize validation report
+        report = {
+            "version_id": version_id,
+            "status": "pending",
+            "checks": {},
+            "errors": [],
+        }
+
+        # Get SQLite validation
+        sqlite_snapshots = self.metadata_db.list_snapshots()
+        report["checks"]["sqlite_snapshot_exists"] = version_id in sqlite_snapshots or any(
+            version_id in s for s in sqlite_snapshots
+        )
+
+        # Get Qdrant validation
+        qdrant_validation = self.qdrant_storage.validate_collection(version_id)
+        report["checks"]["qdrant_valid"] = qdrant_validation["status"] == "valid"
+        report["checks"]["qdrant_point_count"] = qdrant_validation["point_count"]
+
+        # Get Neo4j validation
+        neo4j_validation = self.neo4j_storage.validate_graph(version_id)
+        report["checks"]["neo4j_valid"] = neo4j_validation["status"] == "valid"
+        report["checks"]["neo4j_paragraph_count"] = neo4j_validation["node_counts"].get(
+            "Paragraph", 0
+        )
+
+        # Cross-system consistency check
+        qdrant_count = report["checks"]["qdrant_point_count"]
+        neo4j_count = report["checks"]["neo4j_paragraph_count"]
+        report["checks"]["counts_match"] = qdrant_count == neo4j_count
+
+        # If counts don't match, add to errors
+        if not report["checks"]["counts_match"]:
+            report["errors"].append(
+                f"Count mismatch: Qdrant={qdrant_count}, Neo4j={neo4j_count}"
+            )
+
+        # Check for orphan paragraphs
+        if neo4j_validation.get("orphan_paragraphs", 0) > 0:
+            report["errors"].append(
+                f"Found {neo4j_validation['orphan_paragraphs']} orphan paragraphs"
+            )
+
+        # Check for broken chains
+        if neo4j_validation.get("broken_next_chains", 0) > 0:
+            report["errors"].append(
+                f"Found {neo4j_validation['broken_next_chains']} broken NEXT chains"
+            )
+
+        # Set final status
+        report["status"] = "pass" if len(report["errors"]) == 0 else "fail"
+
+        # Log validation to operation_log
+        self.metadata_db.log_operation(
+            version_id,
+            "validate",
+            "pipeline",
+            "version",
+            version_id,
+            report["status"],
+            error_message=str(report["errors"]) if report["errors"] else None,
+        )
+
+        return report
 
     def _commit_version(self, version_id: str) -> None:
         """Commit a validated version to production.

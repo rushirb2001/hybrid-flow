@@ -1436,7 +1436,13 @@ class Neo4jStorage:
         """
         with self.driver.session() as session:
             # Construct version filter
-            version_label = f":{version_id}" if version_id else ""
+            # Baseline uses the main graph without version label
+            if version_id and "baseline" in version_id:
+                version_label = ""
+            elif version_id:
+                version_label = f":{version_id}"
+            else:
+                version_label = ""
 
             # Count nodes by type
             node_counts = {}
