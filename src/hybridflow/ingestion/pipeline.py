@@ -614,15 +614,86 @@ class IngestionPipeline:
                 # Update version status to archived
                 self.metadata_db.update_version_status(version_id, "archived")
 
-    def _rollback_version(self, version_id: str, error: str = "") -> None:
+    def _rollback_version(self, version_id: str, error: str = None) -> None:
         """Rollback a failed version and cleanup.
 
         Args:
             version_id: The version ID to rollback
             error: Error message or details
         """
-        # Placeholder - will be implemented in future phases
+        # Update status to rolling_back
+        self.metadata_db.update_version_status(version_id, "rolling_back")
+
+        # Log rollback start
+        self.metadata_db.log_operation(
+            version_id,
+            "rollback_start",
+            "pipeline",
+            "version",
+            version_id,
+            "pending",
+            error_message=error,
+        )
+
         self.logger.warning(f"Rolling back version {version_id}: {error}")
+
+        # Clean up SQLite staging
+        try:
+            self.metadata_db.delete_snapshot(version_id)
+            self.logger.info(f"Cleaned up SQLite snapshot for {version_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to clean up SQLite snapshot: {e}")
+            self.metadata_db.log_operation(
+                version_id,
+                "rollback_sqlite",
+                "sqlite",
+                "snapshot",
+                version_id,
+                "failed",
+                error_message=str(e),
+            )
+
+        # Clean up Qdrant staging
+        try:
+            self.qdrant_storage.delete_snapshot(version_id)
+            self.logger.info(f"Cleaned up Qdrant collection for {version_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to clean up Qdrant collection: {e}")
+            self.metadata_db.log_operation(
+                version_id,
+                "rollback_qdrant",
+                "qdrant",
+                "collection",
+                version_id,
+                "failed",
+                error_message=str(e),
+            )
+
+        # Clean up Neo4j staging nodes
+        try:
+            self.neo4j_storage.delete_snapshot(version_id)
+            self.logger.info(f"Cleaned up Neo4j nodes for {version_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to clean up Neo4j nodes: {e}")
+            self.metadata_db.log_operation(
+                version_id,
+                "rollback_neo4j",
+                "neo4j",
+                "nodes",
+                version_id,
+                "failed",
+                error_message=str(e),
+            )
+
+        # Update version status to rolled_back
+        self.metadata_db.update_version_status(version_id, "rolled_back")
+
+        # Log rollback complete
+        self.metadata_db.log_operation(
+            version_id, "rollback_complete", "pipeline", "version", version_id, "success"
+        )
+
+        self.logger.info(f"Successfully rolled back version {version_id}")
 
     def close(self) -> None:
         """Close all storage client connections."""
