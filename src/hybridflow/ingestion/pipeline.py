@@ -30,6 +30,7 @@ class IngestionTransaction:
         self.pipeline = pipeline
         self.description = description
         self.version_id = None
+        self.safety_backup_id = None
         self.started = False
         self.committed = False
         self.operations = []
@@ -40,6 +41,8 @@ class IngestionTransaction:
         Returns:
             Self for context manager usage
         """
+        # Create safety backup before starting transaction
+        self.safety_backup_id = self.pipeline._create_safety_backup()
         self.version_id = self.pipeline._generate_version_id("staging")
         self.started = True
         return self
@@ -57,7 +60,14 @@ class IngestionTransaction:
         """
         # Handle exceptions - rollback and propagate
         if exc_type is not None:
-            self.pipeline._rollback_version(self.version_id, error=str(exc_val))
+            try:
+                self.pipeline._rollback_version(self.version_id, error=str(exc_val))
+            except Exception as rollback_error:
+                # Catastrophic failure - restore from safety backup
+                self.pipeline.logger.error(
+                    f"Rollback failed, restoring from safety backup: {rollback_error}"
+                )
+                self.pipeline._restore_from_safety_backup(self.safety_backup_id)
             return False
 
         # Validate ingestion before committing
@@ -65,8 +75,17 @@ class IngestionTransaction:
         if validation["status"] == "pass":
             self.pipeline._commit_version(self.version_id)
             self.committed = True
+            # Cleanup safety backup on successful commit
+            self.pipeline._cleanup_safety_backup(self.safety_backup_id)
         else:
-            self.pipeline._rollback_version(self.version_id, error=validation["errors"])
+            try:
+                self.pipeline._rollback_version(self.version_id, error=validation["errors"])
+            except Exception as rollback_error:
+                # Catastrophic failure - restore from safety backup
+                self.pipeline.logger.error(
+                    f"Rollback failed, restoring from safety backup: {rollback_error}"
+                )
+                self.pipeline._restore_from_safety_backup(self.safety_backup_id)
             raise ValueError(f"Validation failed: {validation['errors']}")
 
         return False
@@ -694,6 +713,111 @@ class IngestionPipeline:
         )
 
         self.logger.info(f"Successfully rolled back version {version_id}")
+
+    def _create_safety_backup(self) -> str:
+        """Create a safety backup of the current state before transaction.
+
+        Returns:
+            Backup version ID
+        """
+        # Generate backup version ID
+        backup_id = self._generate_version_id("latest_copy")
+
+        self.logger.info(f"Creating safety backup: {backup_id}")
+
+        # Create SQLite backup
+        self.metadata_db.create_snapshot(backup_id)
+
+        # Create Qdrant snapshot (full copy for safety)
+        self.qdrant_storage.create_snapshot(backup_id, show_progress=False)
+
+        # For Neo4j, add :latest_copy label to current nodes (lightweight operation)
+        with self.neo4j_storage.driver.session() as session:
+            result = session.run("MATCH (n) WHERE NOT n:latest_copy SET n:latest_copy")
+            session.run("RETURN 1")  # Ensure transaction completes
+
+        # Update version registry with Qdrant and Neo4j snapshot info
+        # (SQLite snapshot was already registered by create_snapshot)
+        with self.metadata_db.engine.connect() as conn:
+            from sqlalchemy import text
+
+            conn.execute(
+                text("""
+                    UPDATE version_registry
+                    SET qdrant_snapshot = :qdrant_snapshot,
+                        neo4j_snapshot = :neo4j_snapshot,
+                        description = :description,
+                        updated_at = :updated_at
+                    WHERE version_id = :version_id
+                """),
+                {
+                    "qdrant_snapshot": f"textbook_chunks_{backup_id}",
+                    "neo4j_snapshot": "latest_copy",
+                    "description": "Safety backup before staging",
+                    "updated_at": datetime.now().isoformat(),
+                    "version_id": backup_id,
+                },
+            )
+            conn.commit()
+
+        self.logger.info(f"Safety backup created: {backup_id}")
+        return backup_id
+
+    def _restore_from_safety_backup(self, backup_id: str) -> None:
+        """Restore from safety backup in case of catastrophic failure.
+
+        Args:
+            backup_id: The safety backup version ID
+        """
+        self.logger.warning(f"Restoring from safety backup: {backup_id}")
+
+        # Restore SQLite
+        self.metadata_db.restore_snapshot(backup_id)
+
+        # Restore Qdrant by updating alias
+        self.qdrant_storage.restore_snapshot(backup_id)
+
+        # Neo4j restore: remove non-backup nodes and clear latest_copy label
+        with self.neo4j_storage.driver.session() as session:
+            # Remove nodes that don't have the latest_copy label
+            session.run("MATCH (n) WHERE NOT n:latest_copy DETACH DELETE n")
+            # Clear the latest_copy label from remaining nodes
+            session.run("MATCH (n:latest_copy) REMOVE n:latest_copy")
+
+        # Log restoration
+        self.metadata_db.log_operation(
+            backup_id, "restore_safety", "pipeline", "version", backup_id, "success"
+        )
+
+        self.logger.info(f"Successfully restored from safety backup: {backup_id}")
+
+    def _cleanup_safety_backup(self, backup_id: str) -> None:
+        """Cleanup safety backup after successful transaction.
+
+        Args:
+            backup_id: The safety backup version ID
+        """
+        self.logger.info(f"Cleaning up safety backup: {backup_id}")
+
+        # Remove backup artifacts
+        try:
+            self.metadata_db.delete_snapshot(backup_id)
+        except Exception as e:
+            self.logger.warning(f"Failed to delete SQLite backup: {e}")
+
+        try:
+            self.qdrant_storage.delete_snapshot(backup_id)
+        except Exception as e:
+            self.logger.warning(f"Failed to delete Qdrant backup: {e}")
+
+        # Remove latest_copy label from Neo4j nodes
+        try:
+            with self.neo4j_storage.driver.session() as session:
+                session.run("MATCH (n:latest_copy) REMOVE n:latest_copy")
+        except Exception as e:
+            self.logger.warning(f"Failed to remove Neo4j backup labels: {e}")
+
+        self.logger.info(f"Safety backup cleanup complete: {backup_id}")
 
     def close(self) -> None:
         """Close all storage client connections."""
