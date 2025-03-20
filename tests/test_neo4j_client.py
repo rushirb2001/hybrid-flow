@@ -298,6 +298,7 @@ def test_upsert_table(neo4j_storage):
         file_xlsx="table_2_1.xlsx",
         description="Classification of shock",
         page=42,
+        bounds=[50.0, 300.0, 400.0, 500.0],
     )
 
     # Verify table
@@ -343,6 +344,7 @@ def test_upsert_figure(neo4j_storage):
         file_png="figure_2_1.png",
         caption="Shock cascade diagram",
         page=42,
+        bounds=[50.0, 550.0, 400.0, 750.0],
     )
 
     # Verify figure
@@ -409,3 +411,159 @@ def test_full_hierarchy(neo4j_storage):
 
         assert record is not None
         assert record["path_length"] == 5  # 6 nodes, 5 relationships
+
+
+def test_validate_graph(neo4j_storage):
+    """Test validate_graph returns expected structure."""
+    # Create simple hierarchy for validation
+    neo4j_storage.upsert_textbook(textbook_id="test", name="Test")
+    neo4j_storage.upsert_chapter(
+        textbook_id="test", chapter_number="1", title="Test Chapter", version=1
+    )
+
+    report = neo4j_storage.validate_graph()
+
+    # Check report structure
+    assert "version_id" in report
+    assert "node_counts" in report
+    assert "relationship_counts" in report
+    assert "orphan_paragraphs" in report
+    assert "broken_next_chains" in report
+    assert "broken_prev_chains" in report
+    assert "duplicate_chunk_ids" in report
+    assert "invalid_hierarchies" in report
+    assert "status" in report
+
+    # Check version_id for current graph
+    assert report["version_id"] == "current"
+
+    # Status should be valid or issues_found
+    assert report["status"] in ["valid", "issues_found"]
+
+
+def test_validate_graph_orphan_detection(neo4j_storage):
+    """Test orphan paragraph detection."""
+    # Create orphan paragraph
+    neo4j_storage.driver.session().run(
+        """
+        CREATE (p:Paragraph {
+            chunk_id: 'orphan:test:1',
+            text: 'Orphan text',
+            number: '1',
+            page: 1,
+            bounds: [0, 0, 100, 100]
+        })
+        """
+    )
+
+    report = neo4j_storage.validate_graph()
+
+    # Should detect orphan
+    assert report["orphan_paragraphs"] >= 1
+    assert report["status"] == "issues_found"
+
+
+def test_get_graph_stats(neo4j_storage):
+    """Test get_graph_stats returns expected structure."""
+    # Create simple data
+    neo4j_storage.upsert_textbook(textbook_id="test", name="Test")
+    chapter_id = "test:ch1"
+    neo4j_storage.upsert_chapter(
+        textbook_id="test", chapter_number="1", title="Test Chapter", version=1
+    )
+    section_id = f"{chapter_id}:s1"
+    neo4j_storage.upsert_section(
+        chapter_id=chapter_id, section_number="1", title="Test Section"
+    )
+    neo4j_storage.upsert_paragraph(
+        parent_id=section_id,
+        paragraph_number="1",
+        text="Sample paragraph text for testing statistics",
+        chunk_id="test:ch1:1",
+        page=1,
+        bounds=[0, 0, 100, 100]
+    )
+
+    stats = neo4j_storage.get_graph_stats()
+
+    # Should include validate_graph fields
+    assert "version_id" in stats
+    assert "node_counts" in stats
+    assert "status" in stats
+
+    # Should include additional stats
+    assert "text_stats" in stats
+    assert "top_chapters_by_paragraphs" in stats
+    assert "paragraphs_with_cross_references" in stats
+
+    # Check text_stats structure
+    assert "avg" in stats["text_stats"]
+    assert "min" in stats["text_stats"]
+    assert "max" in stats["text_stats"]
+
+    # Text stats should be reasonable
+    assert stats["text_stats"]["avg"] > 0
+    assert stats["text_stats"]["min"] > 0
+
+
+def test_compare_with_qdrant_empty(neo4j_storage):
+    """Test compare_with_qdrant with empty Qdrant set."""
+    # Create a paragraph
+    neo4j_storage.upsert_textbook(textbook_id="test", name="Test")
+    chapter_id = "test:ch1"
+    neo4j_storage.upsert_chapter(
+        textbook_id="test", chapter_number="1", title="Test", version=1
+    )
+    section_id = f"{chapter_id}:s1"
+    neo4j_storage.upsert_section(
+        chapter_id=chapter_id, section_number="1", title="Test"
+    )
+    neo4j_storage.upsert_paragraph(
+        parent_id=section_id,
+        paragraph_number="1",
+        text="Test",
+        chunk_id="test:ch1:1",
+        page=1,
+        bounds=[0, 0, 100, 100]
+    )
+
+    # Compare with empty Qdrant set
+    comparison = neo4j_storage.compare_with_qdrant(set())
+
+    assert comparison["neo4j_count"] >= 1
+    assert comparison["qdrant_count"] == 0
+    assert comparison["common_count"] == 0
+    assert comparison["consistency"] == "mismatch"
+
+
+def test_compare_with_qdrant_matching(neo4j_storage):
+    """Test compare_with_qdrant with matching chunk_ids."""
+    # Create a paragraph
+    neo4j_storage.upsert_textbook(textbook_id="test", name="Test")
+    chapter_id = "test:ch1"
+    neo4j_storage.upsert_chapter(
+        textbook_id="test", chapter_number="1", title="Test", version=1
+    )
+    section_id = f"{chapter_id}:s1"
+    neo4j_storage.upsert_section(
+        chapter_id=chapter_id, section_number="1", title="Test"
+    )
+    chunk_id = "test:ch1:1"
+    neo4j_storage.upsert_paragraph(
+        parent_id=section_id,
+        paragraph_number="1",
+        text="Test",
+        chunk_id=chunk_id,
+        page=1,
+        bounds=[0, 0, 100, 100]
+    )
+
+    # Compare with matching set
+    comparison = neo4j_storage.compare_with_qdrant({chunk_id})
+
+    assert comparison["neo4j_count"] >= 1
+    assert comparison["qdrant_count"] == 1
+    assert comparison["common_count"] >= 1
+    assert comparison["only_in_neo4j"] == 0
+    assert comparison["only_in_qdrant"] == 0
+    assert comparison["consistency"] == "pass"

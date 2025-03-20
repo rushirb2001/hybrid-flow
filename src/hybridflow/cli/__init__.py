@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from hybridflow.cli.query import add_query_commands
 from hybridflow.ingestion.pipeline import IngestionPipeline
+from hybridflow.storage.neo4j_client import Neo4jStorage
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -218,6 +219,124 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
         pipeline.close()
 
 
+def cmd_validate_neo4j(args: argparse.Namespace) -> int:
+    """Validate Neo4j graph and generate report.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    import json
+
+    setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
+
+    try:
+        config = load_config()
+
+        # Create Neo4j storage client
+        storage = Neo4jStorage(
+            uri=config["neo4j_uri"],
+            user=config["neo4j_user"],
+            password=config["neo4j_password"],
+        )
+
+        logger.info(f"Validating Neo4j graph (version: {args.version or 'current'})...")
+
+        # Get comprehensive stats
+        stats = storage.get_graph_stats(args.version)
+
+        # Add Qdrant comparison if requested
+        if args.compare_qdrant:
+            from qdrant_client import QdrantClient
+
+            logger.info("Comparing with Qdrant...")
+            qclient = QdrantClient(host=config["qdrant_host"], port=config["qdrant_port"])
+
+            # Get all Qdrant chunk_ids
+            chunk_ids = set()
+            offset = None
+            while True:
+                result, offset = qclient.scroll(
+                    "textbook_chunks",
+                    limit=1000,
+                    offset=offset,
+                    with_payload=True
+                )
+                if not result:
+                    break
+                chunk_ids.update(
+                    p.payload.get("chunk_id") for p in result if p.payload.get("chunk_id")
+                )
+                if offset is None:
+                    break
+
+            comparison = storage.compare_with_qdrant(chunk_ids, args.version)
+            stats["qdrant_comparison"] = comparison
+
+        # Output to file if specified
+        if args.output:
+            output_path = Path(args.output)
+            with open(output_path, "w") as f:
+                json.dump(stats, f, indent=2)
+            logger.info(f"Validation report saved to: {output_path}")
+
+        # Print summary
+        print("\n" + "=" * 60)
+        print(f"Neo4j Validation Report - Version: {stats['version_id']}")
+        print("=" * 60)
+        print(f"\nStatus: {stats['status'].upper()}")
+        print(f"\nNode Counts:")
+        for node_type, count in stats["node_counts"].items():
+            print(f"  {node_type:20s}: {count:>6d}")
+
+        print(f"\nData Quality:")
+        print(f"  Orphan Paragraphs:      {stats['orphan_paragraphs']:>6d}")
+        print(f"  Broken NEXT Chains:     {stats['broken_next_chains']:>6d}")
+        print(f"  Broken PREV Chains:     {stats['broken_prev_chains']:>6d}")
+        print(f"  Duplicate Chunk IDs:    {stats['duplicate_chunk_ids']:>6d}")
+        print(f"  Invalid Hierarchies:    {stats['invalid_hierarchies']:>6d}")
+
+        print(f"\nText Statistics:")
+        print(f"  Average Length:         {stats['text_stats']['avg']:>6.1f} chars")
+        print(f"  Min Length:             {stats['text_stats']['min']:>6d} chars")
+        print(f"  Max Length:             {stats['text_stats']['max']:>6d} chars")
+
+        print(f"\nCross-References:")
+        print(f"  Paragraphs with Refs:   {stats['paragraphs_with_cross_references']:>6d}")
+
+        if "qdrant_comparison" in stats:
+            comp = stats["qdrant_comparison"]
+            print(f"\nQdrant Consistency:")
+            print(f"  Neo4j Count:            {comp['neo4j_count']:>6d}")
+            print(f"  Qdrant Count:           {comp['qdrant_count']:>6d}")
+            print(f"  Common Count:           {comp['common_count']:>6d}")
+            print(f"  Only in Neo4j:          {comp['only_in_neo4j']:>6d}")
+            print(f"  Only in Qdrant:         {comp['only_in_qdrant']:>6d}")
+            print(f"  Status:                 {comp['consistency'].upper()}")
+
+        print("=" * 60 + "\n")
+
+        # Exit code based on validation status
+        if stats["status"] == "valid":
+            if "qdrant_comparison" in stats and stats["qdrant_comparison"]["consistency"] != "pass":
+                logger.warning("Graph is valid but Qdrant consistency check failed")
+                return 1
+            logger.info("✓ Validation passed")
+            return 0
+        else:
+            logger.error("✗ Validation failed - issues found")
+            return 1
+
+    except Exception as e:
+        logger.error(f"Error during validation: {e}", exc_info=args.verbose)
+        return 1
+    finally:
+        storage.close()
+
+
 def main() -> int:
     """Main CLI entry point.
 
@@ -268,6 +387,25 @@ def main() -> int:
         "--force", action="store_true", help="Force re-ingestion even if unchanged"
     )
     parser_all.set_defaults(func=cmd_ingest_all)
+
+    # validate-neo4j command
+    parser_validate = subparsers.add_parser(
+        "validate-neo4j", help="Validate Neo4j graph and generate report"
+    )
+    parser_validate.add_argument(
+        "--version",
+        help="Version ID to validate (e.g., v1_baseline, v2_test). If not specified, validates current graph.",
+    )
+    parser_validate.add_argument(
+        "--output",
+        help="Output file path for JSON report (e.g., report.json)",
+    )
+    parser_validate.add_argument(
+        "--compare-qdrant",
+        action="store_true",
+        help="Compare with Qdrant for consistency check",
+    )
+    parser_validate.set_defaults(func=cmd_validate_neo4j)
 
     # Add query commands
     add_query_commands(subparsers)
