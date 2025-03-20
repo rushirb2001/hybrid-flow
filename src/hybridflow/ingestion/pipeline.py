@@ -154,16 +154,29 @@ class IngestionPipeline:
         # Set up logging
         self.logger = logging.getLogger(__name__)
 
-    def ingest_chapter(self, file_path: str, force: bool = False) -> Dict:
+    def ingest_chapter(
+        self, file_path: str, force: bool = False, version_id: Optional[str] = None
+    ) -> Dict:
         """Ingest a single chapter from JSON file into all storage backends.
 
         Args:
             file_path: Path to chapter JSON file
             force: If True, force re-ingestion even if content unchanged
+            version_id: Optional version ID for staged ingestion (e.g., 'staging_20250319')
+                       Note: Currently limited by Neo4j unique constraints on node IDs.
+                       Works best with fresh/non-conflicting data.
 
         Returns:
-            Dict with status, chunks_inserted count
+            Dict with status, chunks_inserted count, duration_ms, and version_id
+
+        Note:
+            When version_id is provided, all Neo4j nodes receive the version label
+            and Qdrant points are stored in a versioned collection. This enables
+            isolated staging of data before committing to production.
         """
+        # Record start time for performance tracking
+        start_time = datetime.now()
+
         try:
             # Load and parse chapter
             chapter = self.loader.parse_chapter(file_path)
@@ -200,6 +213,7 @@ class IngestionPipeline:
             self.neo4j_storage.upsert_textbook(
                 textbook_id=chapter.textbook_id.value,
                 name=textbook_name_map.get(chapter.textbook_id.value, chapter.textbook_id.value),
+                version_id=version_id,
             )
 
             # Upsert chapter node in Neo4j
@@ -209,6 +223,7 @@ class IngestionPipeline:
                 chapter_number=chapter.chapter_number,
                 title=chapter.title,
                 version=version,
+                version_id=version_id,
             )
 
             # Prepare Qdrant chunks for batch upsert
@@ -259,6 +274,7 @@ class IngestionPipeline:
                         chapter_id=chapter_id,
                         section_number=section.number,
                         title=section.title,
+                        version_id=version_id,
                     )
 
                     if subsection:
@@ -267,6 +283,7 @@ class IngestionPipeline:
                             section_id=section_id,
                             subsection_number=subsection.number,
                             title=subsection.title,
+                            version_id=version_id,
                         )
 
                         if subsubsection:
@@ -275,6 +292,7 @@ class IngestionPipeline:
                                 subsection_id=subsection_id,
                                 subsubsection_number=subsubsection.number,
                                 title=subsubsection.title,
+                                version_id=version_id,
                             )
                             parent_id = subsubsection_id
                         else:
@@ -299,6 +317,7 @@ class IngestionPipeline:
                             paragraph.bounds.y2,
                         ],
                         cross_references=cross_references,
+                        version_id=version_id,
                     )
 
                     # Upsert tables if present
@@ -315,6 +334,7 @@ class IngestionPipeline:
                                     table.bounds.x2,
                                     table.bounds.y2,
                                 ],
+                                version_id=version_id,
                             )
 
                     # Upsert figures if present
@@ -331,6 +351,7 @@ class IngestionPipeline:
                                     figure.bounds.x2,
                                     figure.bounds.y2,
                                 ],
+                                version_id=version_id,
                             )
 
                 # Collect for Qdrant batch upsert
@@ -338,21 +359,45 @@ class IngestionPipeline:
 
             # Batch upsert to Qdrant
             if qdrant_chunks:
-                self.qdrant_storage.upsert_chunks(qdrant_chunks)
+                self.qdrant_storage.upsert_chunks(qdrant_chunks, version_id=version_id)
 
-            # Upsert chapter metadata
+            # Upsert chapter metadata (metadata DB doesn't use versioning)
             self.metadata_db.upsert_chapter(chapter)
 
             # Link sequential paragraphs with NEXT/PREV relationships
             chapter_id = f"{chapter.textbook_id.value}:ch{chapter.chapter_number}"
-            links_created = self.neo4j_storage.link_sequential_paragraphs(chapter_id)
+            links_created = self.neo4j_storage.link_sequential_paragraphs(
+                chapter_id, version_id=version_id
+            )
+
+            # Calculate duration
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+
+            # Log operation if version_id provided
+            if version_id:
+                self.metadata_db.log_operation(
+                    version_id,
+                    "ingest_chapter",
+                    "pipeline",
+                    "chapter",
+                    chapter_id,
+                    "success",
+                    duration_ms=duration_ms,
+                )
 
             self.logger.info(
                 f"Successfully ingested {chapter.textbook_id.value}:{chapter.chapter_number} "
-                f"with {len(chunks)} chunks and {links_created} sequential links"
+                f"with {len(chunks)} chunks and {links_created} sequential links "
+                f"in {duration_ms}ms"
+                + (f" (version: {version_id})" if version_id else "")
             )
 
-            return {"status": "success", "chunks_inserted": len(chunks)}
+            return {
+                "status": "success",
+                "chunks_inserted": len(chunks),
+                "duration_ms": duration_ms,
+                "version_id": version_id,
+            }
 
         except Exception as e:
             self.logger.error(f"Failed to ingest {file_path}: {e}")
