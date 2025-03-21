@@ -440,6 +440,131 @@ class IngestionPipeline:
 
         return results
 
+    def ingest_chapter_transactional(
+        self, file_path: str, description: str = "", force: bool = False
+    ) -> Dict:
+        """Ingest a single chapter with full transaction safety.
+
+        Creates a transaction with safety backup, validates after ingestion,
+        and commits if validation passes or rolls back if it fails.
+
+        Args:
+            file_path: Path to chapter JSON file
+            description: Optional description of this transaction
+            force: If True, force re-ingestion even if content unchanged
+
+        Returns:
+            Dict with ingestion results, version_id, and committed status
+        """
+        with IngestionTransaction(self, description) as txn:
+            result = self.ingest_chapter(file_path, force=force, version_id=txn.version_id)
+            txn.track_operation("ingest_chapter", file_path, result["status"])
+            return {**result, "version_id": txn.version_id, "committed": txn.committed}
+
+    def ingest_directory_transactional(
+        self, directory_path: str, description: str = "", force: bool = False
+    ) -> Dict:
+        """Ingest all chapters from a directory with full transaction safety.
+
+        Creates a single transaction for the entire directory. If any chapter fails,
+        the entire batch is rolled back.
+
+        Args:
+            directory_path: Path to directory containing chapter JSON files
+            description: Optional description of this transaction
+            force: If True, force re-ingestion even if content unchanged
+
+        Returns:
+            Dict with aggregated results, version_id, and committed status
+        """
+        import glob
+        import os
+
+        with IngestionTransaction(self, description) as txn:
+            results = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+
+            # Get all JSON files
+            files = sorted(glob.glob(os.path.join(directory_path, "*.json")))
+
+            # Ingest each file
+            for file_path in files:
+                try:
+                    result = self.ingest_chapter(
+                        file_path, force=force, version_id=txn.version_id
+                    )
+                    results["total"] += 1
+
+                    if result["status"] == "success":
+                        results["success"] += 1
+                    elif result["status"] == "skipped":
+                        results["skipped"] += 1
+                    else:
+                        results["failed"] += 1
+
+                    txn.track_operation("ingest_chapter", file_path, result["status"])
+
+                except Exception as e:
+                    results["failed"] += 1
+                    txn.track_operation("ingest_chapter", file_path, "failed")
+                    self.logger.error(f"Failed to ingest {file_path}: {e}")
+                    raise
+
+            self.logger.info(
+                f"Directory ingestion complete: {results['success']} succeeded, "
+                f"{results['skipped']} skipped, {results['failed']} failed"
+            )
+
+            return {**results, "version_id": txn.version_id, "committed": txn.committed}
+
+    def ingest_all_transactional(
+        self, data_dir: str = "data", description: str = "", force: bool = False
+    ) -> Dict:
+        """Ingest all textbooks with full transaction safety.
+
+        Creates a single transaction for all textbooks. If any chapter fails,
+        the entire ingestion is rolled back.
+
+        Args:
+            data_dir: Path to data directory containing textbook subdirectories
+            description: Optional description of this transaction
+            force: If True, force re-ingestion even if content unchanged
+
+        Returns:
+            Dict with per-textbook results, version_id, and committed status
+        """
+        import glob
+        import os
+
+        with IngestionTransaction(self, description) as txn:
+            results = {"textbooks": {}, "total_chapters": 0, "total_chunks": 0}
+
+            # Loop through textbook directories
+            for textbook in ["bailey", "sabiston", "schwartz"]:
+                textbook_path = os.path.join(data_dir, textbook)
+
+                if os.path.exists(textbook_path):
+                    files = sorted(glob.glob(os.path.join(textbook_path, "*.json")))
+                    results["textbooks"][textbook] = {"files": len(files), "success": 0}
+
+                    # Ingest each file with version_id
+                    for file_path in files:
+                        result = self.ingest_chapter(
+                            file_path, force=force, version_id=txn.version_id
+                        )
+
+                        if result["status"] == "success":
+                            results["textbooks"][textbook]["success"] += 1
+                            results["total_chunks"] += result.get("chunks_inserted", 0)
+
+                        txn.track_operation("ingest_chapter", file_path, result["status"])
+                        results["total_chapters"] += 1
+
+                    self.logger.info(
+                        f"Completed {textbook}: {results['textbooks'][textbook]['success']}/{len(files)}"
+                    )
+
+            return {**results, "version_id": txn.version_id, "committed": txn.committed}
+
     def _generate_version_id(self, prefix: str = "v") -> str:
         """Generate a unique version ID with timestamp.
 
