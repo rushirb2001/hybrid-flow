@@ -51,6 +51,33 @@ class Neo4jStorage:
             return ""
         return f":{version_id}"
 
+    def _versioned_id(self, base_id: str, version_id: Optional[str] = None) -> str:
+        """Generate versioned ID by appending version suffix.
+
+        Converts a base ID into a versioned ID to avoid constraint conflicts.
+        Instead of using labels for versioning (which conflicts with unique constraints),
+        we append the version_id as a suffix to create distinct IDs.
+
+        Args:
+            base_id: Original ID (e.g., 'bailey', 'bailey:ch60')
+            version_id: Optional version identifier (e.g., 'v2_test', 'staging_1')
+                       If None, returns base_id unchanged
+
+        Returns:
+            str: Versioned ID in format 'base_id::version_id' or base_id if no version
+
+        Examples:
+            >>> storage._versioned_id('bailey', None)
+            'bailey'
+            >>> storage._versioned_id('bailey', 'v2_test')
+            'bailey::v2_test'
+            >>> storage._versioned_id('bailey:ch60', 'staging_1')
+            'bailey:ch60::staging_1'
+        """
+        if version_id is None:
+            return base_id
+        return f"{base_id}::{version_id}"
+
     def _build_node_pattern(
         self, node_type: str, version_id: Optional[str] = None, properties: str = ""
     ) -> str:
@@ -101,23 +128,25 @@ class Neo4jStorage:
             textbook_id: Unique textbook identifier
             name: Full name of the textbook
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to node (e.g., :v2_test).
-                       If None, creates unversioned node (backward compatible).
+                       If provided, appends version to ID (e.g., 'bailey::v2_test').
+                       If None, uses base ID unchanged (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
             >>> storage.upsert_textbook('bailey', 'Bailey & Love')
+            # Creates node with id='bailey'
 
             # Versioned
             >>> storage.upsert_textbook('bailey', 'Bailey & Love', version_id='v2_test')
+            # Creates node with id='bailey::v2_test', original_id='bailey'
         """
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MERGE (t:Textbook{version_labels} {{id: $textbook_id}})
-        SET t.name = $name
+        actual_id = self._versioned_id(textbook_id, version_id)
+        query = """
+        MERGE (t:Textbook {id: $actual_id})
+        SET t.name = $name, t.original_id = $original_id
         """
         with self.driver.session() as session:
-            session.run(query, textbook_id=textbook_id, name=name)
+            session.run(query, actual_id=actual_id, name=name, original_id=textbook_id)
 
     def upsert_chapter(
         self, textbook_id: str, chapter_number: str, title: str, version: int, version_id: Optional[str] = None
@@ -130,29 +159,33 @@ class Neo4jStorage:
             title: Chapter title
             version: Version number
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both textbook and chapter nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, appends version to IDs for isolation.
+                       If None, uses base IDs unchanged (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
             >>> storage.upsert_chapter('bailey', '60', 'The Thorax', version=1)
+            # Creates chapter with id='bailey:ch60'
 
             # Versioned
             >>> storage.upsert_chapter('bailey', '60', 'The Thorax', version=1, version_id='v2_test')
+            # Creates chapter with id='bailey:ch60::v2_test', original_id='bailey:ch60'
         """
         chapter_id = f"{textbook_id}:ch{chapter_number}"
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MERGE (t:Textbook{version_labels} {{id: $textbook_id}})
-        MERGE (c:Chapter{version_labels} {{id: $chapter_id}})
-        SET c.number = $chapter_number, c.title = $title, c.version = $version
+        actual_textbook_id = self._versioned_id(textbook_id, version_id)
+        actual_chapter_id = self._versioned_id(chapter_id, version_id)
+        query = """
+        MERGE (t:Textbook {id: $actual_textbook_id})
+        MERGE (c:Chapter {id: $actual_chapter_id})
+        SET c.number = $chapter_number, c.title = $title, c.version = $version, c.original_id = $original_id
         MERGE (t)-[:CONTAINS]->(c)
         """
         with self.driver.session() as session:
             session.run(
                 query,
-                textbook_id=textbook_id,
-                chapter_id=chapter_id,
+                actual_textbook_id=actual_textbook_id,
+                actual_chapter_id=actual_chapter_id,
+                original_id=chapter_id,
                 chapter_number=chapter_number,
                 title=title,
                 version=version,
@@ -164,33 +197,37 @@ class Neo4jStorage:
         """Insert or update a section node and link to chapter.
 
         Args:
-            chapter_id: Parent chapter identifier
+            chapter_id: Parent chapter identifier (base ID without version)
             section_number: Section number
             title: Section title
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both chapter and section nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, appends version to IDs for isolation.
+                       If None, uses base IDs unchanged (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
             >>> storage.upsert_section('bailey:ch60', '2', 'Anatomy')
+            # Creates section with id='bailey:ch60:s2'
 
             # Versioned
             >>> storage.upsert_section('bailey:ch60', '2', 'Anatomy', version_id='v2_test')
+            # Creates section with id='bailey:ch60:s2::v2_test', original_id='bailey:ch60:s2'
         """
         section_id = f"{chapter_id}:s{section_number}"
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MERGE (c:Chapter{version_labels} {{id: $chapter_id}})
-        MERGE (s:Section{version_labels} {{id: $section_id}})
-        SET s.number = $section_number, s.title = $title
+        actual_chapter_id = self._versioned_id(chapter_id, version_id)
+        actual_section_id = self._versioned_id(section_id, version_id)
+        query = """
+        MERGE (c:Chapter {id: $actual_chapter_id})
+        MERGE (s:Section {id: $actual_section_id})
+        SET s.number = $section_number, s.title = $title, s.original_id = $original_id
         MERGE (c)-[:HAS_SECTION]->(s)
         """
         with self.driver.session() as session:
             session.run(
                 query,
-                chapter_id=chapter_id,
-                section_id=section_id,
+                actual_chapter_id=actual_chapter_id,
+                actual_section_id=actual_section_id,
+                original_id=section_id,
                 section_number=section_number,
                 title=title,
             )
@@ -201,33 +238,37 @@ class Neo4jStorage:
         """Insert or update a subsection node and link to section.
 
         Args:
-            section_id: Parent section identifier
+            section_id: Parent section identifier (base ID without version)
             subsection_number: Subsection number
             title: Subsection title
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both section and subsection nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, appends version to IDs for isolation.
+                       If None, uses base IDs unchanged (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
             >>> storage.upsert_subsection('bailey:ch60:s2', '2.1', 'Lung Anatomy')
+            # Creates subsection with id='bailey:ch60:s2:ss2.1'
 
             # Versioned
             >>> storage.upsert_subsection('bailey:ch60:s2', '2.1', 'Lung Anatomy', version_id='v2_test')
+            # Creates subsection with id='bailey:ch60:s2:ss2.1::v2_test'
         """
         subsection_id = f"{section_id}:ss{subsection_number}"
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MERGE (s:Section{version_labels} {{id: $section_id}})
-        MERGE (ss:Subsection{version_labels} {{id: $subsection_id}})
-        SET ss.number = $subsection_number, ss.title = $title
+        actual_section_id = self._versioned_id(section_id, version_id)
+        actual_subsection_id = self._versioned_id(subsection_id, version_id)
+        query = """
+        MERGE (s:Section {id: $actual_section_id})
+        MERGE (ss:Subsection {id: $actual_subsection_id})
+        SET ss.number = $subsection_number, ss.title = $title, ss.original_id = $original_id
         MERGE (s)-[:HAS_SUBSECTION]->(ss)
         """
         with self.driver.session() as session:
             session.run(
                 query,
-                section_id=section_id,
-                subsection_id=subsection_id,
+                actual_section_id=actual_section_id,
+                actual_subsection_id=actual_subsection_id,
+                original_id=subsection_id,
                 subsection_number=subsection_number,
                 title=title,
             )
@@ -238,33 +279,37 @@ class Neo4jStorage:
         """Insert or update a subsubsection node and link to subsection.
 
         Args:
-            subsection_id: Parent subsection identifier
+            subsection_id: Parent subsection identifier (base ID without version)
             subsubsection_number: Subsubsection number
             title: Subsubsection title
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both subsection and subsubsection nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, appends version to IDs for isolation.
+                       If None, uses base IDs unchanged (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
             >>> storage.upsert_subsubsection('bailey:ch60:s2:ss2.1', '2.1.1', 'Bronchi')
+            # Creates subsubsection with id='bailey:ch60:s2:ss2.1:sss2.1.1'
 
             # Versioned
             >>> storage.upsert_subsubsection('bailey:ch60:s2:ss2.1', '2.1.1', 'Bronchi', version_id='v2_test')
+            # Creates subsubsection with id='bailey:ch60:s2:ss2.1:sss2.1.1::v2_test'
         """
         subsubsection_id = f"{subsection_id}:sss{subsubsection_number}"
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MERGE (ss:Subsection{version_labels} {{id: $subsection_id}})
-        MERGE (sss:Subsubsection{version_labels} {{id: $subsubsection_id}})
-        SET sss.number = $subsubsection_number, sss.title = $title
+        actual_subsection_id = self._versioned_id(subsection_id, version_id)
+        actual_subsubsection_id = self._versioned_id(subsubsection_id, version_id)
+        query = """
+        MERGE (ss:Subsection {id: $actual_subsection_id})
+        MERGE (sss:Subsubsection {id: $actual_subsubsection_id})
+        SET sss.number = $subsubsection_number, sss.title = $title, sss.original_id = $original_id
         MERGE (ss)-[:HAS_SUBSUBSECTION]->(sss)
         """
         with self.driver.session() as session:
             session.run(
                 query,
-                subsection_id=subsection_id,
-                subsubsection_id=subsubsection_id,
+                actual_subsection_id=actual_subsection_id,
+                actual_subsubsection_id=actual_subsubsection_id,
+                original_id=subsubsection_id,
                 subsubsection_number=subsubsection_number,
                 title=title,
             )
@@ -283,26 +328,28 @@ class Neo4jStorage:
         """Insert or update a paragraph node and link to parent.
 
         Args:
-            parent_id: Parent node identifier (section/subsection/subsubsection)
+            parent_id: Parent node identifier (section/subsection/subsubsection, base ID)
             paragraph_number: Paragraph number
             text: Paragraph text content
-            chunk_id: Unique chunk identifier
+            chunk_id: Unique chunk identifier (base chunk_id)
             page: Page number
             bounds: Bounding box coordinates [x1, y1, x2, y2]
             cross_references: List of cross-references to figures/tables (optional)
                 Format: [{"type": "figure", "number": "60.5"}, ...]
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both parent and paragraph nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, appends version to chunk_id and parent_id for isolation.
+                       If None, uses base IDs unchanged (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
             >>> storage.upsert_paragraph('bailey:ch60:s2:ss2.1', '2.1.1', 'Text...', 'bailey:ch60:2.1.1',
             ...                          page=1025, bounds=[100, 200, 500, 250])
+            # Creates paragraph with chunk_id='bailey:ch60:2.1.1'
 
             # Versioned
             >>> storage.upsert_paragraph('bailey:ch60:s2:ss2.1', '2.1.1', 'Text...', 'bailey:ch60:2.1.1',
             ...                          page=1025, bounds=[100, 200, 500, 250], version_id='v2_test')
+            # Creates paragraph with chunk_id='bailey:ch60:2.1.1::v2_test', original_chunk_id='bailey:ch60:2.1.1'
         """
         if cross_references is None:
             cross_references = []
@@ -311,14 +358,16 @@ class Neo4jStorage:
         # Neo4j doesn't support lists of maps, only primitives or arrays of primitives
         cross_references_json = json.dumps(cross_references)
 
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MERGE (p:Paragraph{version_labels} {{chunk_id: $chunk_id}})
+        actual_parent_id = self._versioned_id(parent_id, version_id)
+        actual_chunk_id = self._versioned_id(chunk_id, version_id)
+
+        query = """
+        MERGE (p:Paragraph {chunk_id: $actual_chunk_id})
         SET p.number = $paragraph_number, p.text = $text, p.page = $page, p.bounds = $bounds,
-            p.cross_references = $cross_references
+            p.cross_references = $cross_references, p.original_chunk_id = $original_chunk_id
         WITH p
-        OPTIONAL MATCH (parent{version_labels})
-        WHERE parent.id = $parent_id
+        OPTIONAL MATCH (parent)
+        WHERE parent.id = $actual_parent_id
         FOREACH (ignored IN CASE WHEN parent IS NOT NULL THEN [1] ELSE [] END |
             MERGE (parent)-[:HAS_PARAGRAPH]->(p)
         )
@@ -326,10 +375,11 @@ class Neo4jStorage:
         with self.driver.session() as session:
             session.run(
                 query,
-                parent_id=parent_id,
+                actual_parent_id=actual_parent_id,
+                actual_chunk_id=actual_chunk_id,
+                original_chunk_id=chunk_id,
                 paragraph_number=paragraph_number,
                 text=text,
-                chunk_id=chunk_id,
                 page=page,
                 bounds=bounds,
                 cross_references=cross_references_json,
@@ -349,7 +399,7 @@ class Neo4jStorage:
         """Insert or update a table node and link to paragraph.
 
         Args:
-            paragraph_chunk_id: Parent paragraph chunk identifier
+            paragraph_chunk_id: Parent paragraph chunk identifier (base chunk_id)
             table_number: Table number
             description: Table description
             page: Page number
@@ -357,8 +407,8 @@ class Neo4jStorage:
             file_png: PNG file path (optional)
             file_xlsx: Excel file path (optional)
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both paragraph and table nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, uses versioned paragraph chunk_id for lookup.
+                       If None, uses base chunk_id (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
@@ -369,10 +419,10 @@ class Neo4jStorage:
             >>> storage.upsert_table('bailey:ch60:2.1.1', '60.1', 'Lung volumes',
             ...                      page=1025, bounds=[100, 200, 500, 400], version_id='v2_test')
         """
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MATCH (p:Paragraph{version_labels} {{chunk_id: $paragraph_chunk_id}})
-        MERGE (t:Table{version_labels} {{paragraph_id: $paragraph_chunk_id, table_number: $table_number}})
+        actual_paragraph_chunk_id = self._versioned_id(paragraph_chunk_id, version_id)
+        query = """
+        MATCH (p:Paragraph {chunk_id: $actual_paragraph_chunk_id})
+        MERGE (t:Table {paragraph_id: $actual_paragraph_chunk_id, table_number: $table_number})
         SET t.file_png = $file_png, t.file_xlsx = $file_xlsx,
             t.description = $description, t.page = $page, t.bounds = $bounds
         MERGE (p)-[:CONTAINS_TABLE]->(t)
@@ -380,7 +430,7 @@ class Neo4jStorage:
         with self.driver.session() as session:
             session.run(
                 query,
-                paragraph_chunk_id=paragraph_chunk_id,
+                actual_paragraph_chunk_id=actual_paragraph_chunk_id,
                 table_number=table_number,
                 file_png=file_png,
                 file_xlsx=file_xlsx,
@@ -402,15 +452,15 @@ class Neo4jStorage:
         """Insert or update a figure node and link to paragraph.
 
         Args:
-            paragraph_chunk_id: Parent paragraph chunk identifier
+            paragraph_chunk_id: Parent paragraph chunk identifier (base chunk_id)
             figure_number: Figure number
             caption: Figure caption
             page: Page number
             bounds: Bounding box coordinates [x1, y1, x2, y2]
             file_png: PNG file path (optional)
             version_id: Optional version identifier for multi-version support.
-                       If provided, adds version label to both paragraph and figure nodes.
-                       If None, creates unversioned nodes (backward compatible).
+                       If provided, uses versioned paragraph chunk_id for lookup.
+                       If None, uses base chunk_id (backward compatible).
 
         Examples:
             # Non-versioned (backward compatible)
@@ -421,17 +471,17 @@ class Neo4jStorage:
             >>> storage.upsert_figure('bailey:ch60:2.1.1', '60.5', 'Bronchial tree',
             ...                       page=1026, bounds=[100, 300, 500, 600], version_id='v2_test')
         """
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MATCH (p:Paragraph{version_labels} {{chunk_id: $paragraph_chunk_id}})
-        MERGE (f:Figure{version_labels} {{paragraph_id: $paragraph_chunk_id, figure_number: $figure_number}})
+        actual_paragraph_chunk_id = self._versioned_id(paragraph_chunk_id, version_id)
+        query = """
+        MATCH (p:Paragraph {chunk_id: $actual_paragraph_chunk_id})
+        MERGE (f:Figure {paragraph_id: $actual_paragraph_chunk_id, figure_number: $figure_number})
         SET f.file_png = $file_png, f.caption = $caption, f.page = $page, f.bounds = $bounds
         MERGE (p)-[:CONTAINS_FIGURE]->(f)
         """
         with self.driver.session() as session:
             session.run(
                 query,
-                paragraph_chunk_id=paragraph_chunk_id,
+                actual_paragraph_chunk_id=actual_paragraph_chunk_id,
                 figure_number=figure_number,
                 file_png=file_png,
                 caption=caption,
@@ -478,10 +528,10 @@ class Neo4jStorage:
         in sequential order based on their paragraph numbers.
 
         Args:
-            chapter_id: Chapter identifier to link paragraphs within
+            chapter_id: Chapter identifier to link paragraphs within (base chapter_id)
             version_id: Optional version identifier for multi-version support.
-                       If provided, only links paragraphs with matching version label.
-                       If None, links unversioned paragraphs (backward compatible).
+                       If provided, uses versioned chapter_id for filtering.
+                       If None, uses base chapter_id (backward compatible).
 
         Returns:
             Number of NEXT relationships created
@@ -493,10 +543,10 @@ class Neo4jStorage:
             # Versioned
             >>> links_created = storage.link_sequential_paragraphs('bailey:ch60', version_id='v2_test')
         """
-        version_labels = self._get_version_labels(version_id)
-        query = f"""
-        MATCH (c:Chapter{version_labels} {{id: $chapter_id}})
-        MATCH (parent{version_labels})-[:HAS_PARAGRAPH]->(p:Paragraph{version_labels})
+        actual_chapter_id = self._versioned_id(chapter_id, version_id)
+        query = """
+        MATCH (c:Chapter {id: $actual_chapter_id})
+        MATCH (parent)-[:HAS_PARAGRAPH]->(p:Paragraph)
         WHERE (c)-[:HAS_SECTION*0..1]->()-[:HAS_SUBSECTION*0..1]->()-[:HAS_SUBSUBSECTION*0..1]->(parent)
         WITH parent, p
         ORDER BY p.number
@@ -508,7 +558,7 @@ class Neo4jStorage:
         RETURN count(*) as links_created
         """
         with self.driver.session() as session:
-            result = session.run(query, chapter_id=chapter_id)
+            result = session.run(query, actual_chapter_id=actual_chapter_id)
             record = result.single()
             return record["links_created"] if record else 0
 
@@ -1274,10 +1324,10 @@ class Neo4jStorage:
             )
 
     def delete_snapshot(self, version_id: str) -> int:
-        """Delete a snapshot by removing all nodes with the version label.
+        """Delete a snapshot by removing all nodes with versioned IDs.
 
         WARNING: This operation is irreversible. All nodes and relationships
-        with the version label will be permanently deleted.
+        with IDs ending in '::version_id' will be permanently deleted.
 
         Args:
             version_id: Version identifier to delete
@@ -1303,17 +1353,22 @@ class Neo4jStorage:
         with self.driver.session() as session:
             deleted_total = 0
             batch_size = 1000
+            version_suffix = f"::{version_id}"
 
-            # Delete all nodes with version label in batches
+            # Delete all nodes with versioned IDs in batches
             # DETACH DELETE removes the node and all its relationships
             while True:
+                # Match nodes by ID pattern (for paragraphs use chunk_id)
                 result = session.run(
-                    f"""
-                    MATCH (n:{version_id})
+                    """
+                    MATCH (n)
+                    WHERE (n.id IS NOT NULL AND n.id ENDS WITH $suffix)
+                       OR (n.chunk_id IS NOT NULL AND n.chunk_id ENDS WITH $suffix)
                     WITH n LIMIT $batch
                     DETACH DELETE n
                     RETURN count(n) as count
                     """,
+                    suffix=version_suffix,
                     batch=batch_size,
                 )
                 count = result.single()["count"]
@@ -1323,13 +1378,19 @@ class Neo4jStorage:
 
             # Verify deletion
             result = session.run(
-                f"MATCH (n:{version_id}) RETURN count(n) as count"
+                """
+                MATCH (n)
+                WHERE (n.id IS NOT NULL AND n.id ENDS WITH $suffix)
+                   OR (n.chunk_id IS NOT NULL AND n.chunk_id ENDS WITH $suffix)
+                RETURN count(n) as count
+                """,
+                suffix=version_suffix,
             )
             remaining = result.single()["count"]
 
             if remaining > 0:
                 raise Exception(
-                    f"Deletion incomplete: {remaining} nodes still exist with :{version_id} label"
+                    f"Deletion incomplete: {remaining} nodes still exist with IDs ending in '{version_suffix}'"
                 )
 
             print(f"Deleted snapshot '{version_id}': {deleted_total} nodes removed")
