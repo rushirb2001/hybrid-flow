@@ -492,6 +492,104 @@ class QdrantStorage:
 
         return version_ids
 
+    def create_alias_backup(self, alias_name: str) -> bool:
+        """Create an alias backup pointing to the current collection (fast alternative to full copy).
+
+        Creates an alias that points to the current collection without copying data.
+        This is much faster than create_snapshot() but provides less isolation.
+        Use for quick, temporary backups during short operations.
+
+        Args:
+            alias_name: Name for the backup alias (e.g., 'backup_staging_123')
+
+        Returns:
+            bool: True if alias created successfully, False otherwise
+
+        Example:
+            >>> storage = QdrantStorage(host='localhost', port=6333)
+            >>> storage.create_alias_backup('backup_quick_test')
+            True
+            >>> # Alias created instantly, no data copy
+        """
+        try:
+            self.client.update_collection_aliases(
+                change_aliases_operations=[
+                    qmodels.CreateAliasOperation(
+                        create_alias=qmodels.CreateAlias(
+                            collection_name=self.collection_name,
+                            alias_name=alias_name,
+                        )
+                    )
+                ]
+            )
+            return True
+        except Exception as e:
+            print(f"Failed to create alias backup '{alias_name}': {e}")
+            return False
+
+    def delete_alias(self, alias_name: str) -> bool:
+        """Delete an alias.
+
+        Removes the alias but does not affect the underlying collection.
+
+        Args:
+            alias_name: Name of the alias to delete
+
+        Returns:
+            bool: True if alias deleted successfully, False otherwise
+
+        Example:
+            >>> storage = QdrantStorage(host='localhost', port=6333)
+            >>> storage.delete_alias('backup_quick_test')
+            True
+        """
+        try:
+            self.client.update_collection_aliases(
+                change_aliases_operations=[
+                    qmodels.DeleteAliasOperation(
+                        delete_alias=qmodels.DeleteAlias(alias_name=alias_name)
+                    )
+                ]
+            )
+            return True
+        except Exception as e:
+            print(f"Failed to delete alias '{alias_name}': {e}")
+            return False
+
+    def switch_to_alias(self, alias_name: str, target_collection: str) -> bool:
+        """Switch an alias to point to a different collection.
+
+        Updates the alias to point to a new target collection.
+        Useful for switching between versions without data movement.
+
+        Args:
+            alias_name: The alias to update
+            target_collection: The collection to point the alias to
+
+        Returns:
+            bool: True if alias switched successfully, False otherwise
+
+        Example:
+            >>> storage = QdrantStorage(host='localhost', port=6333)
+            >>> storage.switch_to_alias('textbook_chunks_latest', 'textbook_chunks_v2_test')
+            True
+        """
+        try:
+            self.client.update_collection_aliases(
+                change_aliases_operations=[
+                    qmodels.CreateAliasOperation(
+                        create_alias=qmodels.CreateAlias(
+                            collection_name=target_collection,
+                            alias_name=alias_name,
+                        )
+                    )
+                ]
+            )
+            return True
+        except Exception as e:
+            print(f"Failed to switch alias '{alias_name}' to '{target_collection}': {e}")
+            return False
+
     def validate_collection(self, version_id: Optional[str] = None) -> Dict[str, Any]:
         """Validate the health and integrity of a collection.
 
