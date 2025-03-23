@@ -462,7 +462,7 @@ class IngestionPipeline:
             return {**result, "version_id": txn.version_id, "committed": txn.committed}
 
     def ingest_directory_transactional(
-        self, directory_path: str, description: str = "", force: bool = False
+        self, directory_path: str, description: str = "", force: bool = False, validate_every: int = 0
     ) -> Dict:
         """Ingest all chapters from a directory with full transaction safety.
 
@@ -473,6 +473,8 @@ class IngestionPipeline:
             directory_path: Path to directory containing chapter JSON files
             description: Optional description of this transaction
             force: If True, force re-ingestion even if content unchanged
+            validate_every: If > 0, run validation every N successful ingestions.
+                           Catches errors early in long batches. Default 0 (no interim validation).
 
         Returns:
             Dict with aggregated results, version_id, and committed status
@@ -503,6 +505,18 @@ class IngestionPipeline:
 
                     txn.track_operation("ingest_chapter", file_path, result["status"])
 
+                    # Incremental validation checkpoint
+                    if validate_every > 0 and results["success"] % validate_every == 0:
+                        self.logger.info(
+                            f"Incremental validation checkpoint at {results['success']} chapters"
+                        )
+                        interim_validation = self._validate_ingestion(txn.version_id)
+                        if interim_validation["status"] != "pass":
+                            raise ValueError(
+                                f"Interim validation failed at chapter {results['success']}: "
+                                f"{interim_validation['errors']}"
+                            )
+
                 except Exception as e:
                     results["failed"] += 1
                     txn.track_operation("ingest_chapter", file_path, "failed")
@@ -517,7 +531,7 @@ class IngestionPipeline:
             return {**results, "version_id": txn.version_id, "committed": txn.committed}
 
     def ingest_all_transactional(
-        self, data_dir: str = "data", description: str = "", force: bool = False
+        self, data_dir: str = "data", description: str = "", force: bool = False, validate_every: int = 0
     ) -> Dict:
         """Ingest all textbooks with full transaction safety.
 
@@ -528,6 +542,8 @@ class IngestionPipeline:
             data_dir: Path to data directory containing textbook subdirectories
             description: Optional description of this transaction
             force: If True, force re-ingestion even if content unchanged
+            validate_every: If > 0, run validation every N successful ingestions.
+                           Catches errors early in long batches. Default 0 (no interim validation).
 
         Returns:
             Dict with per-textbook results, version_id, and committed status
@@ -536,7 +552,7 @@ class IngestionPipeline:
         import os
 
         with IngestionTransaction(self, description) as txn:
-            results = {"textbooks": {}, "total_chapters": 0, "total_chunks": 0}
+            results = {"textbooks": {}, "total_chapters": 0, "total_chunks": 0, "successful_chapters": 0}
 
             # Loop through textbook directories
             for textbook in ["bailey", "sabiston", "schwartz"]:
@@ -555,9 +571,22 @@ class IngestionPipeline:
                         if result["status"] == "success":
                             results["textbooks"][textbook]["success"] += 1
                             results["total_chunks"] += result.get("chunks_inserted", 0)
+                            results["successful_chapters"] += 1
 
                         txn.track_operation("ingest_chapter", file_path, result["status"])
                         results["total_chapters"] += 1
+
+                        # Incremental validation checkpoint
+                        if validate_every > 0 and results["successful_chapters"] % validate_every == 0:
+                            self.logger.info(
+                                f"Incremental validation checkpoint at {results['successful_chapters']} chapters"
+                            )
+                            interim_validation = self._validate_ingestion(txn.version_id)
+                            if interim_validation["status"] != "pass":
+                                raise ValueError(
+                                    f"Interim validation failed at chapter {results['successful_chapters']}: "
+                                    f"{interim_validation['errors']}"
+                                )
 
                     self.logger.info(
                         f"Completed {textbook}: {results['textbooks'][textbook]['success']}/{len(files)}"
@@ -739,13 +768,13 @@ class IngestionPipeline:
         # Update version status to committing
         self.metadata_db.update_version_status(version_id, "committing")
 
-        # Restore SQLite from staging snapshot
-        self.metadata_db.restore_snapshot(version_id)
+        # Metadata DB is intentionally unversioned - already updated in place during ingestion
+        # No snapshot restore needed
 
         # Update Qdrant alias to point to new version
         self.qdrant_storage.restore_snapshot(version_id)
 
-        # For Neo4j, nodes already created with version label during ingestion
+        # For Neo4j, nodes already created with versioned IDs during ingestion
         # No additional action needed for commit
 
         # Rotate old versions

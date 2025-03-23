@@ -1496,14 +1496,14 @@ class Neo4jStorage:
             Status: valid
         """
         with self.driver.session() as session:
-            # Construct version filter
-            # Baseline uses the main graph without version label
+            # Construct version filter for ID-based versioning
+            # Baseline uses the main graph without version suffix
             if version_id and "baseline" in version_id:
-                version_label = ""
+                version_suffix = None
             elif version_id:
-                version_label = f":{version_id}"
+                version_suffix = f"::{version_id}"
             else:
-                version_label = ""
+                version_suffix = None
 
             # Count nodes by type
             node_counts = {}
@@ -1513,13 +1513,25 @@ class Neo4jStorage:
                 "Section",
                 "Subsection",
                 "Subsubsection",
-                "Paragraph",
                 "Table",
                 "Figure",
             ]:
-                query = f"MATCH (n:{node_type}{version_label}) RETURN count(n) as count"
-                result = session.run(query)
+                if version_suffix:
+                    query = f"MATCH (n:{node_type}) WHERE n.id ENDS WITH $suffix RETURN count(n) as count"
+                    result = session.run(query, suffix=version_suffix)
+                else:
+                    query = f"MATCH (n:{node_type}) WHERE NOT n.id CONTAINS '::' RETURN count(n) as count"
+                    result = session.run(query)
                 node_counts[node_type] = result.single()["count"]
+
+            # Paragraphs use chunk_id instead of id
+            if version_suffix:
+                query = "MATCH (p:Paragraph) WHERE p.chunk_id ENDS WITH $suffix RETURN count(p) as count"
+                result = session.run(query, suffix=version_suffix)
+            else:
+                query = "MATCH (p:Paragraph) WHERE NOT p.chunk_id CONTAINS '::' RETURN count(p) as count"
+                result = session.run(query)
+            node_counts["Paragraph"] = result.single()["count"]
 
             # Count relationships by type
             relationship_counts = {}
@@ -1534,58 +1546,126 @@ class Neo4jStorage:
                 "CONTAINS_TABLE",
                 "CONTAINS_FIGURE",
             ]:
-                # For versioned validation, filter by nodes having version label
-                if version_id:
+                # For versioned validation, filter by nodes having version suffix
+                if version_suffix:
                     query = f"""
-                    MATCH (n{version_label})-[r:{rel_type}]->(m{version_label})
+                    MATCH (n)-[r:{rel_type}]->(m)
+                    WHERE ((n.id IS NOT NULL AND n.id ENDS WITH $suffix) OR
+                           (n.chunk_id IS NOT NULL AND n.chunk_id ENDS WITH $suffix))
+                      AND ((m.id IS NOT NULL AND m.id ENDS WITH $suffix) OR
+                           (m.chunk_id IS NOT NULL AND m.chunk_id ENDS WITH $suffix))
                     RETURN count(r) as count
                     """
+                    result = session.run(query, suffix=version_suffix)
                 else:
-                    query = f"MATCH ()-[r:{rel_type}]->() RETURN count(r) as count"
-                result = session.run(query)
+                    query = f"""
+                    MATCH (n)-[r:{rel_type}]->(m)
+                    WHERE ((n.id IS NULL OR NOT n.id CONTAINS '::') OR
+                           (n.chunk_id IS NULL OR NOT n.chunk_id CONTAINS '::'))
+                      AND ((m.id IS NULL OR NOT m.id CONTAINS '::') OR
+                           (m.chunk_id IS NULL OR NOT m.chunk_id CONTAINS '::'))
+                    RETURN count(r) as count
+                    """
+                    result = session.run(query)
                 relationship_counts[rel_type] = result.single()["count"]
 
             # Find orphan paragraphs (paragraphs without parent relationships)
-            query = f"""
-            MATCH (p:Paragraph{version_label})
-            WHERE NOT EXISTS((p)<-[:HAS_PARAGRAPH]-())
-            RETURN count(p) as orphans
-            """
-            orphan_paragraphs = session.run(query).single()["orphans"]
+            if version_suffix:
+                query = """
+                MATCH (p:Paragraph)
+                WHERE p.chunk_id ENDS WITH $suffix
+                  AND NOT EXISTS((p)<-[:HAS_PARAGRAPH]-())
+                RETURN count(p) as orphans
+                """
+                orphan_paragraphs = session.run(query, suffix=version_suffix).single()["orphans"]
+            else:
+                query = """
+                MATCH (p:Paragraph)
+                WHERE NOT p.chunk_id CONTAINS '::'
+                  AND NOT EXISTS((p)<-[:HAS_PARAGRAPH]-())
+                RETURN count(p) as orphans
+                """
+                orphan_paragraphs = session.run(query).single()["orphans"]
 
             # Check for broken NEXT/PREV chains
-            query = f"""
-            MATCH (p:Paragraph{version_label})-[:NEXT]->(p2:Paragraph{version_label})
-            WHERE NOT EXISTS((p2)-[:PREV]->(p))
-            RETURN count(p) as broken_next
-            """
-            broken_next = session.run(query).single()["broken_next"]
+            if version_suffix:
+                query = """
+                MATCH (p:Paragraph)-[:NEXT]->(p2:Paragraph)
+                WHERE p.chunk_id ENDS WITH $suffix
+                  AND p2.chunk_id ENDS WITH $suffix
+                  AND NOT EXISTS((p2)-[:PREV]->(p))
+                RETURN count(p) as broken_next
+                """
+                broken_next = session.run(query, suffix=version_suffix).single()["broken_next"]
 
-            query = f"""
-            MATCH (p:Paragraph{version_label})-[:PREV]->(p2:Paragraph{version_label})
-            WHERE NOT EXISTS((p2)-[:NEXT]->(p))
-            RETURN count(p) as broken_prev
-            """
-            broken_prev = session.run(query).single()["broken_prev"]
+                query = """
+                MATCH (p:Paragraph)-[:PREV]->(p2:Paragraph)
+                WHERE p.chunk_id ENDS WITH $suffix
+                  AND p2.chunk_id ENDS WITH $suffix
+                  AND NOT EXISTS((p2)-[:NEXT]->(p))
+                RETURN count(p) as broken_prev
+                """
+                broken_prev = session.run(query, suffix=version_suffix).single()["broken_prev"]
+            else:
+                query = """
+                MATCH (p:Paragraph)-[:NEXT]->(p2:Paragraph)
+                WHERE NOT p.chunk_id CONTAINS '::'
+                  AND NOT p2.chunk_id CONTAINS '::'
+                  AND NOT EXISTS((p2)-[:PREV]->(p))
+                RETURN count(p) as broken_next
+                """
+                broken_next = session.run(query).single()["broken_next"]
+
+                query = """
+                MATCH (p:Paragraph)-[:PREV]->(p2:Paragraph)
+                WHERE NOT p.chunk_id CONTAINS '::'
+                  AND NOT p2.chunk_id CONTAINS '::'
+                  AND NOT EXISTS((p2)-[:NEXT]->(p))
+                RETURN count(p) as broken_prev
+                """
+                broken_prev = session.run(query).single()["broken_prev"]
 
             # Check for duplicate chunk_ids
-            query = f"""
-            MATCH (p:Paragraph{version_label})
-            WITH p.chunk_id as chunk_id, count(*) as count
-            WHERE count > 1
-            RETURN sum(count) as duplicates
-            """
-            result = session.run(query).single()
+            if version_suffix:
+                query = """
+                MATCH (p:Paragraph)
+                WHERE p.chunk_id ENDS WITH $suffix
+                WITH p.chunk_id as chunk_id, count(*) as count
+                WHERE count > 1
+                RETURN sum(count) as duplicates
+                """
+                result = session.run(query, suffix=version_suffix).single()
+            else:
+                query = """
+                MATCH (p:Paragraph)
+                WHERE NOT p.chunk_id CONTAINS '::'
+                WITH p.chunk_id as chunk_id, count(*) as count
+                WHERE count > 1
+                RETURN sum(count) as duplicates
+                """
+                result = session.run(query).single()
             duplicates = result["duplicates"] if result["duplicates"] else 0
 
             # Verify parent-child relationships are valid (ID hierarchy check)
-            # Check if section IDs properly start with their chapter ID
-            query = f"""
-            MATCH (c:Chapter{version_label})-[:HAS_SECTION]->(s:Section{version_label})
-            WHERE NOT s.id STARTS WITH c.id
-            RETURN count(s) as invalid
-            """
-            invalid_sections = session.run(query).single()["invalid"]
+            # Check if section original_id properly starts with their chapter original_id
+            if version_suffix:
+                query = """
+                MATCH (c:Chapter)-[:HAS_SECTION]->(s:Section)
+                WHERE c.id ENDS WITH $suffix
+                  AND s.id ENDS WITH $suffix
+                  AND NOT s.original_id STARTS WITH c.original_id
+                RETURN count(s) as invalid
+                """
+                invalid_sections = session.run(query, suffix=version_suffix).single()["invalid"]
+            else:
+                query = """
+                MATCH (c:Chapter)-[:HAS_SECTION]->(s:Section)
+                WHERE NOT c.id CONTAINS '::'
+                  AND NOT s.id CONTAINS '::'
+                  AND (s.original_id IS NULL OR NOT s.original_id STARTS WITH c.id)
+                RETURN count(s) as invalid
+                """
+                invalid_sections = session.run(query).single()["invalid"]
 
             # Determine overall status
             issues = (
