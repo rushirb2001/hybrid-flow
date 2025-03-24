@@ -790,12 +790,47 @@ class IngestionPipeline:
 
         self.logger.info(f"Successfully committed version {version_id}")
 
-    def _rotate_versions(self, keep_count: int = 5) -> None:
+    def _check_version_in_use(self, version_id: str) -> bool:
+        """Check if a version is currently in use.
+
+        Args:
+            version_id: Version identifier to check
+
+        Returns:
+            bool: True if version is in use, False if safe to delete
+        """
+        try:
+            history = self.metadata_db.get_version_history(limit=100)
+            version_record = next(
+                (v for v in history if v["version_id"] == version_id), None
+            )
+
+            if not version_record:
+                return False
+
+            # Check for active statuses
+            active_statuses = ["in_use", "pending", "committing", "staging"]
+            if version_record.get("status") in active_statuses:
+                return True
+
+            return False
+
+        except Exception as e:
+            self.logger.warning(f"Error checking version {version_id}: {e}")
+            return True  # Assume in use for safety
+
+    def _rotate_versions(self, keep_count: int = 5, force: bool = False) -> List[str]:
         """Rotate old versions by archiving versions beyond keep_count.
 
         Args:
             keep_count: Number of committed versions to keep (default: 5)
+            force: If True, delete versions even if in use (default: False)
+
+        Returns:
+            List[str]: Version IDs that were successfully deleted
         """
+        deleted = []
+        skipped = []
         # Get version history
         history = self.metadata_db.get_version_history(limit=100)
 
@@ -811,6 +846,14 @@ class IngestionPipeline:
             to_delete = committed[keep_count:]
             for version in to_delete:
                 version_id = version["version_id"]
+
+                # Check if in use before deleting (unless force=True)
+                if not force:
+                    active_queries = self._check_version_in_use(version["version_id"])
+                    if active_queries:
+                        skipped.append(version["version_id"])
+                        continue
+
                 self.logger.info(f"Archiving old version: {version_id}")
 
                 # Delete snapshots from all storage systems (ignore errors for missing snapshots)
@@ -831,6 +874,15 @@ class IngestionPipeline:
 
                 # Update version status to archived
                 self.metadata_db.update_version_status(version_id, "archived")
+                deleted.append(version_id)
+
+        # Log summary
+        if deleted:
+            self.logger.info(f"Deleted {len(deleted)} old versions: {deleted}")
+        if skipped:
+            self.logger.info(f"Skipped {len(skipped)} versions in use: {skipped}")
+
+        return deleted
 
     def _rollback_version(self, version_id: str, error: str = None) -> None:
         """Rollback a failed version and cleanup.
