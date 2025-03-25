@@ -279,3 +279,93 @@ class VersionManager:
             comparison["neo4j_diff"] = {"error": str(e)}
 
         return comparison
+
+    def delete_version(self, version_id: str, force: bool = False) -> bool:
+        """Delete a version from all storage systems.
+
+        Args:
+            version_id: Version ID to delete
+            force: If True, allow deletion of baseline versions
+
+        Returns:
+            True if deletion successful
+
+        Raises:
+            ValueError: If attempting to delete baseline without force flag
+        """
+        # Check if this is a baseline version
+        if "baseline" in version_id and not force:
+            raise ValueError(
+                f"Cannot delete baseline version {version_id} without force=True"
+            )
+
+        self.logger.info(f"Deleting version: {version_id}")
+
+        try:
+            # Delete from all three systems
+            self.metadata_db.delete_snapshot(version_id)
+            self.qdrant.delete_snapshot(version_id)
+            self.neo4j.delete_snapshot(version_id)
+
+            # Update status to archived
+            self.metadata_db.update_version_status(version_id, "archived")
+
+            self.logger.info(f"Successfully deleted version: {version_id}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to delete version {version_id}: {e}")
+            raise
+
+    def rotate_versions(
+        self, keep_count: int = 5, protect_baseline: bool = True
+    ) -> Dict[str, List[str]]:
+        """Rotate versions by deleting old versions beyond keep_count.
+
+        Args:
+            keep_count: Number of recent versions to keep
+            protect_baseline: If True, never delete baseline versions
+
+        Returns:
+            Dictionary with 'deleted', 'skipped', and 'remaining' lists
+        """
+        self.logger.info(f"Rotating versions: keeping {keep_count}")
+
+        # Get all committed versions sorted by timestamp (newest first)
+        all_versions = self.list_versions(include_archived=False)
+        committed = [v for v in all_versions if v["status"] == "committed"]
+
+        # Sort by version_id (which includes timestamp)
+        committed.sort(key=lambda v: v["version_id"], reverse=True)
+
+        # Identify versions to delete (beyond keep_count)
+        to_keep = committed[:keep_count]
+        to_delete = committed[keep_count:]
+
+        # Filter out baseline if protected
+        if protect_baseline:
+            to_delete = [v for v in to_delete if "baseline" not in v["version_id"]]
+
+        deleted = []
+        skipped = []
+
+        # Delete each version
+        for version in to_delete:
+            version_id = version["version_id"]
+            try:
+                self.delete_version(version_id, force=False)
+                deleted.append(version_id)
+            except Exception as e:
+                self.logger.warning(f"Skipped {version_id}: {e}")
+                skipped.append(version_id)
+
+        result = {
+            "deleted": deleted,
+            "skipped": skipped,
+            "remaining": keep_count,
+        }
+
+        self.logger.info(
+            f"Rotation complete: {len(deleted)} deleted, {len(skipped)} skipped"
+        )
+        return result
