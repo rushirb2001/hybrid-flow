@@ -97,9 +97,20 @@ def cmd_ingest_file(args: argparse.Namespace) -> int:
         pipeline = create_pipeline(config)
 
         logger.info(f"Ingesting file: {file_path}")
-        result = pipeline.ingest_chapter(str(file_path), force=args.force)
 
-        if result["status"] == "success":
+        if args.transactional:
+            logger.info(f"Using transactional ingestion (backup: {args.safety_backup})")
+            result = pipeline.ingest_chapter_transactional(
+                str(file_path), force=args.force
+            )
+            if result.get("committed"):
+                logger.info(f"Transaction committed: {result.get('version_id')}")
+            else:
+                logger.warning("Transaction was not committed")
+        else:
+            result = pipeline.ingest_chapter(str(file_path), force=args.force)
+
+        if result.get("status") == "success" or result.get("committed"):
             logger.info(
                 f"Successfully ingested {result['chunks_inserted']} chunks from {file_path}"
             )
@@ -186,6 +197,11 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
         total_failed = 0
         total_files = 0
 
+        if args.transactional:
+            logger.info(f"Using transactional ingestion (backup: {args.safety_backup})")
+            if args.validate_every > 0:
+                logger.info(f"Validating every {args.validate_every} chapters")
+
         for textbook in textbooks:
             textbook_dir = base_dir / textbook
             if not textbook_dir.exists():
@@ -193,16 +209,26 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
                 continue
 
             logger.info(f"Processing textbook: {textbook}")
-            result = pipeline.ingest_directory(str(textbook_dir), force=args.force)
 
-            total_successful += result["successful_count"]
-            total_skipped += result["skipped_count"]
-            total_failed += result["failed_count"]
-            total_files += result["total_files"]
+            if args.transactional:
+                result = pipeline.ingest_directory_transactional(
+                    str(textbook_dir),
+                    force=args.force,
+                    validate_every=args.validate_every,
+                )
+                if result.get("committed"):
+                    logger.info(f"Transaction committed: {result.get('version_id')}")
+            else:
+                result = pipeline.ingest_directory(str(textbook_dir), force=args.force)
+
+            total_successful += result.get("successful_count", 0)
+            total_skipped += result.get("skipped_count", 0)
+            total_failed += result.get("failed_count", 0)
+            total_files += result.get("total_files", 0)
 
             logger.info(
-                f"{textbook}: {result['successful_count']} succeeded, "
-                f"{result['skipped_count']} skipped, {result['failed_count']} failed"
+                f"{textbook}: {result.get('successful_count', 0)} succeeded, "
+                f"{result.get('skipped_count', 0)} skipped, {result.get('failed_count', 0)} failed"
             )
 
         logger.info(
@@ -583,6 +609,14 @@ def main() -> int:
     parser_file.add_argument(
         "--force", action="store_true", help="Force re-ingestion even if unchanged"
     )
+    parser_file.add_argument(
+        "--transactional", "-t", action="store_true",
+        help="Use transactional ingestion with versioning"
+    )
+    parser_file.add_argument(
+        "--safety-backup", choices=["full", "alias", "none"], default="alias",
+        help="Safety backup strategy (default: alias)"
+    )
     parser_file.set_defaults(func=cmd_ingest_file)
 
     # ingest-dir command
@@ -606,6 +640,18 @@ def main() -> int:
     )
     parser_all.add_argument(
         "--force", action="store_true", help="Force re-ingestion even if unchanged"
+    )
+    parser_all.add_argument(
+        "--transactional", "-t", action="store_true",
+        help="Use transactional ingestion with versioning"
+    )
+    parser_all.add_argument(
+        "--safety-backup", choices=["full", "alias", "none"], default="alias",
+        help="Safety backup strategy (default: alias)"
+    )
+    parser_all.add_argument(
+        "--validate-every", type=int, default=0,
+        help="Validate every N chapters during batch ingestion (0 = no validation)"
     )
     parser_all.set_defaults(func=cmd_ingest_all)
 
