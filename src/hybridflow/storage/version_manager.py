@@ -369,3 +369,123 @@ class VersionManager:
             f"Rotation complete: {len(deleted)} deleted, {len(skipped)} skipped"
         )
         return result
+
+    def is_baseline_registered(self) -> bool:
+        """Check if baseline migration has been run.
+
+        Returns:
+            True if baseline version exists in registry
+        """
+        versions = self.list_versions(include_archived=True)
+        for version in versions:
+            if "baseline" in version["version_id"]:
+                return True
+        return False
+
+    def run_baseline_migration(
+        self, description: str = "Initial baseline from existing data"
+    ) -> str:
+        """Run baseline migration to register existing data as v1_baseline.
+
+        This creates a baseline version that references the current state of all
+        three storage systems without copying data. Uses aliases in Qdrant and
+        labels in Neo4j to mark existing data as baseline.
+
+        Args:
+            description: Description for baseline version
+
+        Returns:
+            The baseline version_id
+
+        Raises:
+            Exception: If baseline migration fails
+        """
+        # Check if baseline already exists
+        if self.is_baseline_registered():
+            self.logger.info("Baseline already registered, returning existing")
+            versions = self.list_versions(include_archived=True)
+            for version in versions:
+                if "baseline" in version["version_id"]:
+                    return version["version_id"]
+
+        # Generate baseline version ID
+        baseline_id = f"v1_baseline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        baseline_alias = f"textbook_chunks_{baseline_id}"
+        self.logger.info(f"Running baseline migration: {baseline_id}")
+
+        try:
+            # Register baseline in SQLite metadata DB
+            self.logger.debug("Registering baseline in metadata DB")
+            self.metadata_db.register_version(
+                version_id=baseline_id,
+                description=description,
+                sqlite_snapshot="baseline",
+                qdrant_snapshot=baseline_alias,
+                neo4j_snapshot="baseline_labels",
+            )
+            # Update status to committed
+            self.metadata_db.update_version_status(baseline_id, "committed")
+
+            # Register baseline in Qdrant (create alias to existing collection)
+            self.logger.debug("Registering baseline alias in Qdrant")
+            # Create alias pointing to main collection (no data copy)
+            self.qdrant.create_alias_backup(baseline_alias)
+
+            # Register baseline in Neo4j (add :Baseline label to existing nodes)
+            self.logger.debug("Adding baseline labels in Neo4j")
+            with self.neo4j.driver.session() as session:
+                # Add :Baseline label to all current nodes
+                session.run(
+                    """
+                    MATCH (n)
+                    WHERE n.id IS NOT NULL
+                    SET n:Baseline
+                    RETURN count(n) as count
+                    """
+                )
+
+            # Validate all three systems
+            self.logger.debug("Validating baseline migration")
+
+            # Check SQLite
+            version_info = self.get_version_info(baseline_id)
+            if not version_info:
+                raise Exception("Baseline not found in metadata DB")
+
+            # Check Qdrant alias exists
+            try:
+                from hybridflow.parsing.embedder import EmbeddingGenerator
+
+                embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+                query_embedding = embedder.generate_embedding("test")
+                self.qdrant.client.query_points(
+                    collection_name=baseline_alias, query=query_embedding, limit=1
+                )
+            except Exception as e:
+                raise Exception(f"Qdrant baseline alias validation failed: {e}")
+
+            # Check Neo4j baseline labels
+            with self.neo4j.driver.session() as session:
+                result = session.run("MATCH (n:Baseline) RETURN count(n) as count")
+                count = result.single()["count"]
+                if count == 0:
+                    raise Exception("No baseline labels found in Neo4j")
+
+            self.logger.info(f"Baseline migration successful: {baseline_id}")
+            return baseline_id
+
+        except Exception as e:
+            self.logger.error(f"Baseline migration failed: {e}")
+            # Attempt cleanup
+            try:
+                self.logger.debug("Attempting baseline cleanup after failure")
+                # Remove from metadata DB
+                self.metadata_db.update_version_status(baseline_id, "failed")
+                # Remove Qdrant alias
+                self.qdrant.delete_alias(baseline_alias)
+                # Remove Neo4j labels
+                with self.neo4j.driver.session() as session:
+                    session.run("MATCH (n:Baseline) REMOVE n:Baseline")
+            except Exception as cleanup_error:
+                self.logger.error(f"Cleanup failed: {cleanup_error}")
+            raise
