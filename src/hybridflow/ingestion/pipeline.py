@@ -14,6 +14,7 @@ from hybridflow.parsing.embedder import EmbeddingGenerator
 from hybridflow.storage.metadata_db import MetadataDatabase
 from hybridflow.storage.neo4j_client import Neo4jStorage
 from hybridflow.storage.qdrant_client import QdrantStorage
+from hybridflow.storage.version_manager import VersionManager
 from hybridflow.validation.loader import JSONLoader
 
 
@@ -153,6 +154,46 @@ class IngestionPipeline:
 
         # Set up logging
         self.logger = logging.getLogger(__name__)
+
+    @property
+    def version_manager(self) -> VersionManager:
+        """Get or create the VersionManager for coordinated version operations.
+
+        Returns:
+            VersionManager instance
+        """
+        if not hasattr(self, "_version_manager"):
+            self._version_manager = VersionManager(
+                self.metadata_db, self.qdrant_storage, self.neo4j_storage
+            )
+        return self._version_manager
+
+    def list_versions(self) -> List[Dict]:
+        """List all available versions.
+
+        Returns:
+            List of version dictionaries
+        """
+        return self.version_manager.list_versions()
+
+    def validate_system(self) -> Dict:
+        """Validate data consistency across all storage systems.
+
+        Returns:
+            Dictionary with validation results
+        """
+        return self.version_manager.validate_all_systems()
+
+    def rotate_old_versions(self, keep_count: int = 5) -> Dict:
+        """Rotate old versions by deleting versions beyond keep_count.
+
+        Args:
+            keep_count: Number of recent versions to keep
+
+        Returns:
+            Dictionary with deleted, skipped, and remaining counts
+        """
+        return self.version_manager.rotate_versions(keep_count)
 
     def ingest_chapter(
         self, file_path: str, force: bool = False, version_id: Optional[str] = None
