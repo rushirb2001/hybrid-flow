@@ -219,6 +219,227 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
         pipeline.close()
 
 
+def cmd_version_list(args: argparse.Namespace) -> int:
+    """List all available versions.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
+
+    try:
+        config = load_config()
+        pipeline = create_pipeline(config)
+
+        versions = pipeline.list_versions()
+
+        print("\n" + "=" * 60)
+        print("Available Versions")
+        print("=" * 60)
+
+        if not versions:
+            print("No versions found.")
+        else:
+            for v in versions:
+                print(f"\n  Version: {v['version_id']}")
+                print(f"  Status:  {v['status']}")
+                if v.get('description'):
+                    print(f"  Description: {v['description']}")
+
+        print("=" * 60 + "\n")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error listing versions: {e}", exc_info=args.verbose)
+        return 1
+    finally:
+        pipeline.close()
+
+
+def cmd_version_info(args: argparse.Namespace) -> int:
+    """Get detailed information about a specific version.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    import json
+
+    setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
+
+    try:
+        config = load_config()
+        pipeline = create_pipeline(config)
+
+        version_info = pipeline.version_manager.get_version_info(args.version_id)
+
+        if not version_info:
+            logger.error(f"Version not found: {args.version_id}")
+            return 1
+
+        print("\n" + "=" * 60)
+        print(f"Version Details: {args.version_id}")
+        print("=" * 60)
+        print(json.dumps(version_info, indent=2, default=str))
+        print("=" * 60 + "\n")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error getting version info: {e}", exc_info=args.verbose)
+        return 1
+    finally:
+        pipeline.close()
+
+
+def cmd_version_validate(args: argparse.Namespace) -> int:
+    """Validate data consistency across all storage systems.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
+
+    try:
+        config = load_config()
+        pipeline = create_pipeline(config)
+
+        logger.info("Validating all storage systems...")
+        report = pipeline.validate_system()
+
+        print("\n" + "=" * 60)
+        print("Cross-System Validation Report")
+        print("=" * 60)
+
+        print(f"\nVersion: {report['version_id']}")
+        print(f"Status:  {report['status'].upper()}")
+
+        print(f"\nSQLite (Metadata DB):")
+        print(f"  Chapters: {report['sqlite'].get('chapters', 'N/A')}")
+
+        print(f"\nQdrant (Vector DB):")
+        qdrant = report.get('qdrant', {})
+        print(f"  Collection: {qdrant.get('collection_name', 'N/A')}")
+        print(f"  Point Count: {qdrant.get('point_count', 'N/A')}")
+        print(f"  Status: {qdrant.get('status', 'N/A')}")
+
+        print(f"\nNeo4j (Graph DB):")
+        neo4j = report.get('neo4j', {})
+        print(f"  Paragraphs: {neo4j.get('node_counts', {}).get('Paragraph', 'N/A')}")
+        print(f"  Status: {neo4j.get('status', 'N/A')}")
+
+        print(f"\nCross-System Check:")
+        cross = report.get('cross_system', {})
+        print(f"  Qdrant Count: {cross.get('qdrant_count', 'N/A')}")
+        print(f"  Neo4j Count: {cross.get('neo4j_count', 'N/A')}")
+        print(f"  Match: {'✓ YES' if cross.get('qdrant_neo4j_match') else '✗ NO'}")
+
+        print("=" * 60 + "\n")
+
+        if report['status'] == 'valid':
+            logger.info("✓ Validation passed")
+            return 0
+        else:
+            logger.error("✗ Validation failed")
+            return 1
+
+    except Exception as e:
+        logger.error(f"Error during validation: {e}", exc_info=args.verbose)
+        return 1
+    finally:
+        pipeline.close()
+
+
+def cmd_version_rotate(args: argparse.Namespace) -> int:
+    """Rotate old versions by deleting versions beyond keep_count.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
+
+    try:
+        config = load_config()
+        pipeline = create_pipeline(config)
+
+        logger.info(f"Rotating versions (keeping {args.keep_count} most recent)...")
+        result = pipeline.rotate_old_versions(keep_count=args.keep_count)
+
+        print("\n" + "=" * 60)
+        print("Version Rotation Result")
+        print("=" * 60)
+
+        print(f"\nDeleted ({len(result['deleted'])}):")
+        for v in result['deleted']:
+            print(f"  - {v}")
+
+        print(f"\nSkipped ({len(result['skipped'])}):")
+        for v in result['skipped']:
+            print(f"  - {v}")
+
+        print(f"\nRemaining: {result['remaining']}")
+        print("=" * 60 + "\n")
+
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error during rotation: {e}", exc_info=args.verbose)
+        return 1
+    finally:
+        pipeline.close()
+
+
+def cmd_version_migrate_baseline(args: argparse.Namespace) -> int:
+    """Run baseline migration to register existing data.
+
+    Args:
+        args: Command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
+
+    try:
+        config = load_config()
+        pipeline = create_pipeline(config)
+
+        logger.info("Running baseline migration...")
+        baseline_id = pipeline.version_manager.run_baseline_migration(
+            description=args.description or "Initial baseline from existing data"
+        )
+
+        print("\n" + "=" * 60)
+        print("Baseline Migration Complete")
+        print("=" * 60)
+        print(f"\nBaseline ID: {baseline_id}")
+        print("=" * 60 + "\n")
+
+        logger.info(f"✓ Baseline migration successful: {baseline_id}")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error during baseline migration: {e}", exc_info=args.verbose)
+        return 1
+    finally:
+        pipeline.close()
+
+
 def cmd_validate_neo4j(args: argparse.Namespace) -> int:
     """Validate Neo4j graph and generate report.
 
@@ -406,6 +627,45 @@ def main() -> int:
         help="Compare with Qdrant for consistency check",
     )
     parser_validate.set_defaults(func=cmd_validate_neo4j)
+
+    # version command group
+    parser_version = subparsers.add_parser(
+        "version", help="Version management commands"
+    )
+    version_subparsers = parser_version.add_subparsers(dest="version_command", help="Version subcommands")
+
+    # version list
+    parser_version_list = version_subparsers.add_parser("list", help="List all available versions")
+    parser_version_list.set_defaults(func=cmd_version_list)
+
+    # version info
+    parser_version_info = version_subparsers.add_parser("info", help="Get details about a specific version")
+    parser_version_info.add_argument("version_id", help="Version ID to get info for")
+    parser_version_info.set_defaults(func=cmd_version_info)
+
+    # version validate
+    parser_version_validate = version_subparsers.add_parser(
+        "validate", help="Validate data consistency across all storage systems"
+    )
+    parser_version_validate.set_defaults(func=cmd_version_validate)
+
+    # version rotate
+    parser_version_rotate = version_subparsers.add_parser(
+        "rotate", help="Rotate old versions by deleting beyond keep count"
+    )
+    parser_version_rotate.add_argument(
+        "--keep-count", type=int, default=5, help="Number of recent versions to keep (default: 5)"
+    )
+    parser_version_rotate.set_defaults(func=cmd_version_rotate)
+
+    # version migrate-baseline
+    parser_version_baseline = version_subparsers.add_parser(
+        "migrate-baseline", help="Run baseline migration to register existing data"
+    )
+    parser_version_baseline.add_argument(
+        "--description", help="Description for baseline version"
+    )
+    parser_version_baseline.set_defaults(func=cmd_version_migrate_baseline)
 
     # Add query commands
     add_query_commands(subparsers)
