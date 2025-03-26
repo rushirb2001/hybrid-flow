@@ -489,3 +489,78 @@ class VersionManager:
             except Exception as cleanup_error:
                 self.logger.error(f"Cleanup failed: {cleanup_error}")
             raise
+
+    def validate_all_systems(
+        self, version_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Validate data consistency across all three storage systems.
+
+        Args:
+            version_id: Optional version ID to validate. If None, validates current state.
+
+        Returns:
+            Dictionary with validation results from all systems and cross-system checks
+        """
+        self.logger.info(f"Validating all systems for version: {version_id or 'current'}")
+
+        validation_report = {
+            "version_id": version_id or "current",
+            "sqlite": {},
+            "qdrant": {},
+            "neo4j": {},
+            "cross_system": {},
+            "status": "valid",
+        }
+
+        try:
+            # Get SQLite stats - count chapters
+            self.logger.debug("Getting SQLite chapter count")
+            from sqlalchemy import func
+            from hybridflow.storage.metadata_db import ChapterMetadata
+            session = self.metadata_db.session_factory()
+            try:
+                chapter_count = session.query(func.count(ChapterMetadata.id)).scalar()
+                validation_report["sqlite"] = {
+                    "chapters": chapter_count,
+                }
+            finally:
+                session.close()
+
+            # Get Qdrant stats
+            self.logger.debug("Validating Qdrant collection")
+            qdrant_stats = self.qdrant.validate_collection(version_id)
+            validation_report["qdrant"] = qdrant_stats
+
+            # Get Neo4j stats
+            self.logger.debug("Validating Neo4j graph")
+            neo4j_stats = self.neo4j.validate_graph(version_id=version_id)
+            validation_report["neo4j"] = neo4j_stats
+
+            # Cross-check counts between Qdrant and Neo4j
+            qdrant_count = qdrant_stats.get("point_count", 0)
+            neo4j_count = neo4j_stats.get("node_counts", {}).get("Paragraph", 0)
+            counts_match = qdrant_count == neo4j_count
+
+            validation_report["cross_system"] = {
+                "qdrant_neo4j_match": counts_match,
+                "qdrant_count": qdrant_count,
+                "neo4j_count": neo4j_count,
+            }
+
+            # Set overall status
+            if not counts_match:
+                validation_report["status"] = "mismatch"
+                self.logger.warning(
+                    f"Count mismatch: Qdrant={qdrant_count}, Neo4j={neo4j_count}"
+                )
+            else:
+                self.logger.info(
+                    f"Validation passed: {qdrant_count} paragraphs in both systems"
+                )
+
+        except Exception as e:
+            self.logger.error(f"Validation failed: {e}")
+            validation_report["status"] = "error"
+            validation_report["error"] = str(e)
+
+        return validation_report
