@@ -496,15 +496,24 @@ class VersionManager:
         """Validate data consistency across all three storage systems.
 
         Args:
-            version_id: Optional version ID to validate. If None, validates current state.
+            version_id: Optional version ID to validate. If None, validates current state
+                       by resolving to the latest committed version.
 
         Returns:
             Dictionary with validation results from all systems and cross-system checks
         """
+        # Resolve "current" to the latest committed version for versioned data queries
+        # Qdrant resolves via _latest alias, Neo4j needs explicit version_id
+        resolved_version = version_id
+        if resolved_version is None:
+            resolved_version = self.metadata_db.get_latest_version()
+            self.logger.debug(f"Resolved 'current' to latest version: {resolved_version}")
+
         self.logger.info(f"Validating all systems for version: {version_id or 'current'}")
 
         validation_report = {
             "version_id": version_id or "current",
+            "resolved_version": resolved_version,
             "sqlite": {},
             "qdrant": {},
             "neo4j": {},
@@ -526,14 +535,14 @@ class VersionManager:
             finally:
                 session.close()
 
-            # Get Qdrant stats
+            # Get Qdrant stats - uses _latest alias when version_id is None
             self.logger.debug("Validating Qdrant collection")
             qdrant_stats = self.qdrant.validate_collection(version_id)
             validation_report["qdrant"] = qdrant_stats
 
-            # Get Neo4j stats
+            # Get Neo4j stats - pass resolved version for versioned data queries
             self.logger.debug("Validating Neo4j graph")
-            neo4j_stats = self.neo4j.validate_graph(version_id=version_id)
+            neo4j_stats = self.neo4j.validate_graph(version_id=resolved_version)
             validation_report["neo4j"] = neo4j_stats
 
             # Cross-check counts between Qdrant and Neo4j

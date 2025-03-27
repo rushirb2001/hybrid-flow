@@ -11,7 +11,17 @@ import qdrant_client.models as qmodels
 
 
 class QdrantStorage:
-    """Manages vector storage and semantic search using Qdrant."""
+    """Manages vector storage and semantic search using Qdrant.
+
+    Uses a GitHub-like versioning model:
+    - base_collection_name: The base name (e.g., "textbook_chunks") - like a repo name
+    - {base}_latest alias: Points to current production version - like "main" branch
+    - {base}_staging{timestamp}: Staging collections during ingestion - like feature branches
+    - On commit, staging becomes the new "latest" - like merging to main
+
+    All reads go through the _latest alias (if it exists), ensuring queries
+    always hit the current production data.
+    """
 
     def __init__(
         self,
@@ -35,9 +45,32 @@ class QdrantStorage:
         """
         self.client = qdrant_client.QdrantClient(host=host, port=port)
         self.version_suffix = version_suffix
+        # Store the base collection name for versioning operations
+        self.base_collection_name = collection_name
+        # For backward compatibility, collection_name includes version suffix if provided
         self.collection_name = (
             f"{collection_name}_{version_suffix}" if version_suffix else collection_name
         )
+
+    @property
+    def read_collection(self) -> str:
+        """Get the collection name to use for read operations.
+
+        Returns the _latest alias if it exists, otherwise falls back to
+        the base collection. This ensures reads always hit the current
+        production data.
+
+        Returns:
+            Collection name or alias to use for reads
+        """
+        latest_alias = f"{self.base_collection_name}_latest"
+        try:
+            # Check if the _latest alias exists by trying to get it
+            self.client.get_collection(latest_alias)
+            return latest_alias
+        except Exception:
+            # Alias doesn't exist, fall back to base collection
+            return self.collection_name
 
     def create_collection(self) -> None:
         """Create the collection if it doesn't exist.
@@ -120,6 +153,8 @@ class QdrantStorage:
     ) -> List[Tuple[str, float]]:
         """Search for similar chunks using vector similarity.
 
+        Uses the _latest alias if available to ensure queries hit production data.
+
         Args:
             query_vector: Query embedding vector
             limit: Maximum number of results to return
@@ -128,7 +163,7 @@ class QdrantStorage:
             List of tuples containing (chunk_id, similarity_score)
         """
         results = self.client.query_points(
-            collection_name=self.collection_name,
+            collection_name=self.read_collection,
             query=query_vector,
             limit=limit,
         )
@@ -138,6 +173,8 @@ class QdrantStorage:
     def delete_chunks(self, chunk_ids: List[str]) -> None:
         """Delete chunks from the vector database.
 
+        Deletes from the current production collection (via _latest alias).
+
         Args:
             chunk_ids: List of chunk IDs to delete
         """
@@ -145,25 +182,30 @@ class QdrantStorage:
         point_ids = [str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk_id)) for chunk_id in chunk_ids]
 
         self.client.delete(
-            collection_name=self.collection_name,
+            collection_name=self.read_collection,
             points_selector=qmodels.PointIdsList(points=point_ids),
         )
 
     def get_collection_info(self) -> Dict:
         """Get collection statistics and information.
 
+        Returns info from the current production collection (via _latest alias).
+
         Returns:
             Dictionary containing:
                 - points_count: Number of vectors in collection
                 - vector_size: Dimensionality of vectors
+                - collection_name: The actual collection being queried
         """
+        target_collection = self.read_collection
         collection_info = self.client.get_collection(
-            collection_name=self.collection_name
+            collection_name=target_collection
         )
 
         return {
             "points_count": collection_info.points_count,
             "vector_size": collection_info.config.params.vectors.size,
+            "collection_name": target_collection,
         }
 
     def register_baseline_collection(self) -> str:
@@ -274,7 +316,8 @@ class QdrantStorage:
             return 0
 
         # Get source and target collection names
-        source_collection = self.collection_name
+        # Source is the current production data (via _latest alias if exists)
+        source_collection = self.read_collection
         target_collection = self._get_versioned_collection_name(version_id)
 
         # Check if target already exists
@@ -626,7 +669,8 @@ class QdrantStorage:
         elif version_id:
             collection_name = self._get_versioned_collection_name(version_id)
         else:
-            collection_name = self.collection_name
+            # Use read_collection to get the current production data (via _latest alias)
+            collection_name = self.read_collection
 
         # Get collection info - handle case where collection doesn't exist
         try:
@@ -722,10 +766,11 @@ class QdrantStorage:
         validation = self.validate_collection(version_id)
 
         # Get sample points for statistical analysis
+        # Use read_collection for current production data (via _latest alias)
         collection_name = (
             self._get_versioned_collection_name(version_id)
             if version_id
-            else self.collection_name
+            else self.read_collection
         )
         sample_result, _ = self.client.scroll(
             collection_name=collection_name, limit=500, with_vectors=True, with_payload=True
@@ -805,10 +850,11 @@ class QdrantStorage:
         expected_chunks = result[0] if result[0] else 0
 
         # Get actual point count from Qdrant
+        # Use read_collection for current production data (via _latest alias)
         collection_name = (
             self._get_versioned_collection_name(version_id)
             if version_id
-            else self.collection_name
+            else self.read_collection
         )
         info = self.client.get_collection(collection_name)
         actual_chunks = info.points_count

@@ -78,13 +78,17 @@ class QueryEngine:
         """Retrieve full context for a chunk including hierarchy.
 
         Args:
-            chunk_id: Chunk identifier
+            chunk_id: Chunk identifier (non-versioned, e.g., 'bailey:ch60:2.1.1')
 
         Returns:
             Dictionary with paragraph text and hierarchy path
         """
+        # Query supports both versioned and non-versioned data:
+        # - Non-versioned: p.chunk_id matches directly
+        # - Versioned: p.original_chunk_id matches the non-versioned chunk_id from Qdrant
         query = """
-        MATCH (p:Paragraph {chunk_id: $chunk_id})
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id = $chunk_id OR p.original_chunk_id = $chunk_id
         OPTIONAL MATCH path = (c:Chapter)-[:HAS_SECTION]->(s:Section)
                       -[:HAS_SUBSECTION*0..1]->(ss)
                       -[:HAS_SUBSUBSECTION*0..1]->(sss)
@@ -218,8 +222,10 @@ class QueryEngine:
                 chunk_id = result["chunk_id"]
 
                 # Query to find parent section ID
+                # Supports both versioned and non-versioned data
                 query = """
-                MATCH (p:Paragraph {chunk_id: $chunk_id})
+                MATCH (p:Paragraph)
+                WHERE p.chunk_id = $chunk_id OR p.original_chunk_id = $chunk_id
                 MATCH (parent)-[:HAS_PARAGRAPH]->(p)
                 WHERE parent:Section OR parent:Subsection OR parent:Subsubsection
                 RETURN parent.id as parent_id, parent.title as parent_title
@@ -409,8 +415,10 @@ class QueryEngine:
         """
         if same_level_only:
             # Get siblings from immediate parent (section/subsection/subsubsection)
+            # Supports both versioned and non-versioned data
             query = """
-            MATCH (current:Paragraph {chunk_id: $chunk_id})
+            MATCH (current:Paragraph)
+            WHERE current.chunk_id = $chunk_id OR current.original_chunk_id = $chunk_id
 
             // Find immediate parent
             MATCH (parent)-[:HAS_PARAGRAPH]->(current)
@@ -453,8 +461,10 @@ class QueryEngine:
             """
         else:
             # Get all siblings from parent section level
+            # Supports both versioned and non-versioned data
             query = """
-            MATCH (current:Paragraph {chunk_id: $chunk_id})
+            MATCH (current:Paragraph)
+            WHERE current.chunk_id = $chunk_id OR current.original_chunk_id = $chunk_id
 
             // Find top-level section
             MATCH (c:Chapter)-[:HAS_SECTION]->(section:Section)
@@ -531,8 +541,10 @@ class QueryEngine:
             Dictionary with before, current, and after paragraphs, including
             all metadata and hierarchy information
         """
+        # Query supports both versioned and non-versioned data
         query = """
-        MATCH (current:Paragraph {chunk_id: $chunk_id})
+        MATCH (current:Paragraph)
+        WHERE current.chunk_id = $chunk_id OR current.original_chunk_id = $chunk_id
 
         // Get paragraphs before (using PREV relationships)
         OPTIONAL MATCH path_before = (current)-[:PREV*1..]->(before:Paragraph)
@@ -676,8 +688,10 @@ class QueryEngine:
             ]
         """
         # First get the paragraph's cross_references property
+        # Supports both versioned and non-versioned data
         query = """
-        MATCH (p:Paragraph {chunk_id: $chunk_id})
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id = $chunk_id OR p.original_chunk_id = $chunk_id
         RETURN p.cross_references as cross_references
         """
 

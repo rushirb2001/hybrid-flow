@@ -40,10 +40,17 @@ class MetadataDatabase:
                     sqlite_snapshot TEXT,
                     qdrant_snapshot TEXT,
                     neo4j_snapshot TEXT,
+                    chapters_count INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """))
+
+            # Add chapters_count column if missing (migration for existing databases)
+            try:
+                conn.execute(text("ALTER TABLE version_registry ADD COLUMN chapters_count INTEGER DEFAULT 0"))
+            except Exception:
+                pass  # Column may already exist
 
             # Create operation_log table
             conn.execute(text("""
@@ -469,7 +476,8 @@ class MetadataDatabase:
             result = conn.execute(
                 text("""
                     SELECT name FROM sqlite_master
-                    WHERE type='table' AND name LIKE 'chapter_metadata_v%'
+                    WHERE type='table' AND name LIKE 'chapter_metadata_%'
+                      AND name != 'chapter_metadata'
                     ORDER BY name
                 """)
             ).fetchall()
@@ -488,6 +496,7 @@ class MetadataDatabase:
         sqlite_snapshot: str = "",
         qdrant_snapshot: str = "",
         neo4j_snapshot: str = "",
+        chapters_count: int = 0,
     ) -> None:
         """Register a new version in the version registry.
 
@@ -497,6 +506,7 @@ class MetadataDatabase:
             sqlite_snapshot: Path or name of SQLite snapshot
             qdrant_snapshot: Path or name of Qdrant snapshot
             neo4j_snapshot: Path or name of Neo4j snapshot
+            chapters_count: Number of chapters in this version
 
         Example:
             >>> db.register_version(
@@ -511,8 +521,8 @@ class MetadataDatabase:
             conn.execute(
                 text("""
                     INSERT INTO version_registry
-                    (version_id, timestamp, status, description, sqlite_snapshot, qdrant_snapshot, neo4j_snapshot)
-                    VALUES (:version_id, :timestamp, 'pending', :description, :sqlite_snapshot, :qdrant_snapshot, :neo4j_snapshot)
+                    (version_id, timestamp, status, description, sqlite_snapshot, qdrant_snapshot, neo4j_snapshot, chapters_count)
+                    VALUES (:version_id, :timestamp, 'pending', :description, :sqlite_snapshot, :qdrant_snapshot, :neo4j_snapshot, :chapters_count)
                 """),
                 {
                     "version_id": version_id,
@@ -521,6 +531,7 @@ class MetadataDatabase:
                     "sqlite_snapshot": sqlite_snapshot,
                     "qdrant_snapshot": qdrant_snapshot,
                     "neo4j_snapshot": neo4j_snapshot,
+                    "chapters_count": chapters_count,
                 },
             )
             conn.commit()
@@ -544,6 +555,31 @@ class MetadataDatabase:
                 """),
                 {
                     "status": status,
+                    "updated_at": datetime.now().isoformat(),
+                    "version_id": version_id,
+                },
+            )
+            conn.commit()
+
+    def update_version_chapters_count(self, version_id: str, chapters_count: int) -> None:
+        """Update the chapters count for a version.
+
+        Args:
+            version_id: Version identifier to update
+            chapters_count: Number of chapters in this version
+
+        Example:
+            >>> db.update_version_chapters_count('v2_minor_20251225_120000', 5)
+        """
+        with self.engine.connect() as conn:
+            conn.execute(
+                text("""
+                    UPDATE version_registry
+                    SET chapters_count=:chapters_count, updated_at=:updated_at
+                    WHERE version_id=:version_id
+                """),
+                {
+                    "chapters_count": chapters_count,
                     "updated_at": datetime.now().isoformat(),
                     "version_id": version_id,
                 },
