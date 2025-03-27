@@ -2219,6 +2219,255 @@ class Neo4jStorage:
             )
             return result.single()['count']
 
+    def copy_to_staging(
+        self,
+        target_version_id: str,
+        source_version_id: Optional[str] = None,
+    ) -> int:
+        """Copy all nodes from source version to target staging version.
+
+        Used for incremental updates: copies existing production data to staging
+        before ingesting new/modified chapters. This preserves unchanged data.
+
+        Args:
+            target_version_id: Target staging version ID (e.g., 'staging20251227_140000')
+            source_version_id: Source version ID to copy from. If None, attempts to
+                              find nodes by checking for versioned IDs (::) pattern.
+
+        Returns:
+            int: Total number of nodes copied
+
+        Example:
+            >>> # Copy from production to staging
+            >>> count = storage.copy_to_staging('staging20251227_140000', 'staging20251227_120000')
+            >>> print(f'Copied {count} nodes')
+        """
+        total_copied = 0
+
+        with self.driver.session() as session:
+            # Determine the source pattern for finding nodes to copy
+            if source_version_id:
+                # Copy nodes with specific version suffix
+                version_pattern = f"::{source_version_id}"
+            else:
+                # Try to find versioned nodes (have :: in their ID)
+                # First check if there are any versioned nodes
+                check_result = session.run(
+                    """
+                    MATCH (n)
+                    WHERE n.id CONTAINS '::' OR n.chunk_id CONTAINS '::'
+                    RETURN count(n) as count
+                    """
+                )
+                versioned_count = check_result.single()['count']
+
+                if versioned_count == 0:
+                    # No versioned data to copy
+                    return 0
+
+                # Find the most common version suffix (the current production version)
+                version_result = session.run(
+                    """
+                    MATCH (p:Paragraph)
+                    WHERE p.chunk_id CONTAINS '::'
+                    WITH split(p.chunk_id, '::')[1] as version_id
+                    RETURN version_id, count(*) as cnt
+                    ORDER BY cnt DESC
+                    LIMIT 1
+                    """
+                )
+                record = version_result.single()
+                if record:
+                    source_version_id = record['version_id']
+                    version_pattern = f"::{source_version_id}"
+                else:
+                    return 0
+
+            # Copy each node type with version ID transformation
+            node_types = [
+                ('Textbook', 'id'),
+                ('Chapter', 'id'),
+                ('Section', 'id'),
+                ('Subsection', 'id'),
+                ('Subsubsection', 'id'),
+            ]
+
+            for node_type, id_field in node_types:
+                result = session.run(
+                    f"""
+                    MATCH (n:{node_type})
+                    WHERE n.{id_field} CONTAINS $version_pattern
+                    WITH n, replace(n.{id_field}, $source_suffix, $target_suffix) as new_id
+                    MERGE (copy:{node_type} {{id: new_id}})
+                    SET copy = n, copy.id = new_id,
+                        copy.original_id = n.original_id
+                    RETURN count(copy) as count
+                    """,
+                    version_pattern=version_pattern,
+                    source_suffix=f"::{source_version_id}",
+                    target_suffix=f"::{target_version_id}",
+                )
+                total_copied += result.single()['count']
+
+            # Copy Paragraphs (use chunk_id instead of id)
+            result = session.run(
+                """
+                MATCH (n:Paragraph)
+                WHERE n.chunk_id CONTAINS $version_pattern
+                WITH n, replace(n.chunk_id, $source_suffix, $target_suffix) as new_chunk_id
+                MERGE (copy:Paragraph {chunk_id: new_chunk_id})
+                SET copy = n, copy.chunk_id = new_chunk_id,
+                    copy.original_chunk_id = n.original_chunk_id
+                RETURN count(copy) as count
+                """,
+                version_pattern=version_pattern,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+            total_copied += result.single()['count']
+
+            # Copy Tables and Figures (use paragraph_id)
+            for node_type in ['Table', 'Figure']:
+                result = session.run(
+                    f"""
+                    MATCH (n:{node_type})
+                    WHERE n.paragraph_id CONTAINS $version_pattern
+                    WITH n, replace(n.paragraph_id, $source_suffix, $target_suffix) as new_para_id
+                    MERGE (copy:{node_type} {{paragraph_id: new_para_id, {node_type.lower()}_number: n.{node_type.lower()}_number}})
+                    SET copy = n, copy.paragraph_id = new_para_id
+                    RETURN count(copy) as count
+                    """,
+                    version_pattern=version_pattern,
+                    source_suffix=f"::{source_version_id}",
+                    target_suffix=f"::{target_version_id}",
+                )
+                total_copied += result.single()['count']
+
+            # Recreate relationships between copied nodes
+            # Copy CONTAINS relationships (Textbook -> Chapter)
+            session.run(
+                """
+                MATCH (t1:Textbook)-[:CONTAINS]->(c1:Chapter)
+                WHERE t1.id CONTAINS $source_suffix AND c1.id CONTAINS $source_suffix
+                WITH t1, c1, replace(t1.id, $source_suffix, $target_suffix) as new_t_id,
+                     replace(c1.id, $source_suffix, $target_suffix) as new_c_id
+                MATCH (t2:Textbook {id: new_t_id})
+                MATCH (c2:Chapter {id: new_c_id})
+                MERGE (t2)-[:CONTAINS]->(c2)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+            # Copy HAS_SECTION relationships
+            session.run(
+                """
+                MATCH (c1:Chapter)-[:HAS_SECTION]->(s1:Section)
+                WHERE c1.id CONTAINS $source_suffix AND s1.id CONTAINS $source_suffix
+                WITH c1, s1, replace(c1.id, $source_suffix, $target_suffix) as new_c_id,
+                     replace(s1.id, $source_suffix, $target_suffix) as new_s_id
+                MATCH (c2:Chapter {id: new_c_id})
+                MATCH (s2:Section {id: new_s_id})
+                MERGE (c2)-[:HAS_SECTION]->(s2)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+            # Copy HAS_SUBSECTION relationships
+            session.run(
+                """
+                MATCH (s1:Section)-[:HAS_SUBSECTION]->(ss1:Subsection)
+                WHERE s1.id CONTAINS $source_suffix AND ss1.id CONTAINS $source_suffix
+                WITH s1, ss1, replace(s1.id, $source_suffix, $target_suffix) as new_s_id,
+                     replace(ss1.id, $source_suffix, $target_suffix) as new_ss_id
+                MATCH (s2:Section {id: new_s_id})
+                MATCH (ss2:Subsection {id: new_ss_id})
+                MERGE (s2)-[:HAS_SUBSECTION]->(ss2)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+            # Copy HAS_SUBSUBSECTION relationships
+            session.run(
+                """
+                MATCH (ss1:Subsection)-[:HAS_SUBSUBSECTION]->(sss1:Subsubsection)
+                WHERE ss1.id CONTAINS $source_suffix AND sss1.id CONTAINS $source_suffix
+                WITH ss1, sss1, replace(ss1.id, $source_suffix, $target_suffix) as new_ss_id,
+                     replace(sss1.id, $source_suffix, $target_suffix) as new_sss_id
+                MATCH (ss2:Subsection {id: new_ss_id})
+                MATCH (sss2:Subsubsection {id: new_sss_id})
+                MERGE (ss2)-[:HAS_SUBSUBSECTION]->(sss2)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+            # Copy HAS_PARAGRAPH relationships (from all parent types)
+            for parent_type in ['Section', 'Subsection', 'Subsubsection']:
+                session.run(
+                    f"""
+                    MATCH (p1:{parent_type})-[:HAS_PARAGRAPH]->(para1:Paragraph)
+                    WHERE p1.id CONTAINS $source_suffix AND para1.chunk_id CONTAINS $source_suffix
+                    WITH p1, para1, replace(p1.id, $source_suffix, $target_suffix) as new_p_id,
+                         replace(para1.chunk_id, $source_suffix, $target_suffix) as new_para_id
+                    MATCH (p2:{parent_type} {{id: new_p_id}})
+                    MATCH (para2:Paragraph {{chunk_id: new_para_id}})
+                    MERGE (p2)-[:HAS_PARAGRAPH]->(para2)
+                    """,
+                    source_suffix=f"::{source_version_id}",
+                    target_suffix=f"::{target_version_id}",
+                )
+
+            # Copy NEXT/PREV relationships between paragraphs
+            session.run(
+                """
+                MATCH (p1:Paragraph)-[:NEXT]->(p2:Paragraph)
+                WHERE p1.chunk_id CONTAINS $source_suffix AND p2.chunk_id CONTAINS $source_suffix
+                WITH p1, p2, replace(p1.chunk_id, $source_suffix, $target_suffix) as new_p1_id,
+                     replace(p2.chunk_id, $source_suffix, $target_suffix) as new_p2_id
+                MATCH (para1:Paragraph {chunk_id: new_p1_id})
+                MATCH (para2:Paragraph {chunk_id: new_p2_id})
+                MERGE (para1)-[:NEXT]->(para2)
+                MERGE (para2)-[:PREV]->(para1)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+            # Copy CONTAINS_TABLE relationships
+            session.run(
+                """
+                MATCH (p1:Paragraph)-[:CONTAINS_TABLE]->(t1:Table)
+                WHERE p1.chunk_id CONTAINS $source_suffix AND t1.paragraph_id CONTAINS $source_suffix
+                WITH p1, t1, replace(p1.chunk_id, $source_suffix, $target_suffix) as new_p_id,
+                     replace(t1.paragraph_id, $source_suffix, $target_suffix) as new_t_para_id
+                MATCH (para:Paragraph {chunk_id: new_p_id})
+                MATCH (tbl:Table {paragraph_id: new_t_para_id, table_number: t1.table_number})
+                MERGE (para)-[:CONTAINS_TABLE]->(tbl)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+            # Copy CONTAINS_FIGURE relationships
+            session.run(
+                """
+                MATCH (p1:Paragraph)-[:CONTAINS_FIGURE]->(f1:Figure)
+                WHERE p1.chunk_id CONTAINS $source_suffix AND f1.paragraph_id CONTAINS $source_suffix
+                WITH p1, f1, replace(p1.chunk_id, $source_suffix, $target_suffix) as new_p_id,
+                     replace(f1.paragraph_id, $source_suffix, $target_suffix) as new_f_para_id
+                MATCH (para:Paragraph {chunk_id: new_p_id})
+                MATCH (fig:Figure {paragraph_id: new_f_para_id, figure_number: f1.figure_number})
+                MERGE (para)-[:CONTAINS_FIGURE]->(fig)
+                """,
+                source_suffix=f"::{source_version_id}",
+                target_suffix=f"::{target_version_id}",
+            )
+
+        return total_copied
+
     def close(self) -> None:
         """Close the Neo4j driver connection."""
         self.driver.close()

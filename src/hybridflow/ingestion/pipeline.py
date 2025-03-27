@@ -39,12 +39,27 @@ class IngestionTransaction:
     def __enter__(self) -> "IngestionTransaction":
         """Start the transaction and generate version ID.
 
+        Uses copy-on-write approach for incremental updates:
+        1. Create safety backup for disaster recovery
+        2. Copy current production data to new staging collection
+        3. New/modified chapters get upserted to staging
+        4. On commit, staging becomes new production
+
         Returns:
             Self for context manager usage
         """
         # Create safety backup before starting transaction
         self.safety_backup_id = self.pipeline._create_safety_backup()
         self.version_id = self.pipeline._generate_version_id("staging")
+
+        # Copy current production data to staging (for incremental updates)
+        # This ensures skipped (unchanged) chapters are preserved
+        self.pipeline.logger.info(f"Initializing staging environment: {self.version_id}")
+        copied_counts = self.pipeline._copy_production_to_staging(self.version_id)
+        self.pipeline.logger.info(
+            f"Copied {copied_counts.get('qdrant', 0)} Qdrant points, "
+            f"{copied_counts.get('neo4j', 0)} Neo4j nodes to staging"
+        )
 
         # Register the staging version in version_registry
         self.pipeline.metadata_db.register_version(
@@ -710,6 +725,40 @@ class IngestionPipeline:
             Formatted version ID string (e.g., 'v20250318_143025')
         """
         return f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    def _copy_production_to_staging(self, version_id: str) -> Dict[str, int]:
+        """Copy current production data to staging for incremental updates.
+
+        This enables incremental ingestion where:
+        - Unchanged chapters are preserved (already in staging from copy)
+        - New/modified chapters are upserted (overwrites in staging)
+        - On commit, staging has complete data set
+
+        Args:
+            version_id: Target staging version ID
+
+        Returns:
+            Dict with counts of copied items per system
+        """
+        counts = {"qdrant": 0, "neo4j": 0}
+
+        # Copy Qdrant data from production to staging
+        try:
+            qdrant_count = self.qdrant_storage.create_snapshot(version_id, show_progress=False)
+            counts["qdrant"] = qdrant_count
+        except Exception as e:
+            # No existing data to copy (first ingestion) - this is OK
+            self.logger.debug(f"No Qdrant data to copy: {e}")
+
+        # Copy Neo4j data from current version to staging version
+        try:
+            neo4j_count = self.neo4j_storage.copy_to_staging(version_id)
+            counts["neo4j"] = neo4j_count
+        except Exception as e:
+            # No existing data to copy (first ingestion) - this is OK
+            self.logger.debug(f"No Neo4j data to copy: {e}")
+
+        return counts
 
     def _create_staging_environment(self, version_id: str) -> Dict[str, bool]:
         """Create staging environment across all storage systems.

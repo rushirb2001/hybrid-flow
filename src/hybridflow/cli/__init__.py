@@ -192,51 +192,67 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
         config = load_config()
         pipeline = create_pipeline(config)
 
-        total_successful = 0
-        total_skipped = 0
-        total_failed = 0
-        total_files = 0
-
         if args.transactional:
+            # Use single combined transaction for all textbooks
             logger.info(f"Using transactional ingestion (backup: {args.safety_backup})")
             if args.validate_every > 0:
                 logger.info(f"Validating every {args.validate_every} chapters")
 
-        for textbook in textbooks:
-            textbook_dir = base_dir / textbook
-            if not textbook_dir.exists():
-                logger.warning(f"Directory not found, skipping: {textbook_dir}")
-                continue
-
-            logger.info(f"Processing textbook: {textbook}")
-
-            if args.transactional:
-                result = pipeline.ingest_directory_transactional(
-                    str(textbook_dir),
-                    force=args.force,
-                    validate_every=args.validate_every,
-                )
-                if result.get("committed"):
-                    logger.info(f"Transaction committed: {result.get('version_id')}")
-            else:
-                result = pipeline.ingest_directory(str(textbook_dir), force=args.force)
-
-            total_successful += result.get("successful_count", 0)
-            total_skipped += result.get("skipped_count", 0)
-            total_failed += result.get("failed_count", 0)
-            total_files += result.get("total_files", 0)
-
-            logger.info(
-                f"{textbook}: {result.get('successful_count', 0)} succeeded, "
-                f"{result.get('skipped_count', 0)} skipped, {result.get('failed_count', 0)} failed"
+            result = pipeline.ingest_all_transactional(
+                data_dir=str(base_dir),
+                force=args.force,
+                validate_every=args.validate_every,
             )
 
-        logger.info(
-            f"\nOverall: {total_successful} succeeded, {total_skipped} skipped, "
-            f"{total_failed} failed (total: {total_files} files)"
-        )
+            if result.get("committed"):
+                logger.info(f"Transaction committed: {result.get('version_id')}")
 
-        return 0 if total_failed == 0 else 1
+            # Log per-textbook results
+            for textbook, stats in result.get("textbooks", {}).items():
+                logger.info(
+                    f"{textbook}: {stats.get('success', 0)} succeeded out of {stats.get('files', 0)} files"
+                )
+
+            logger.info(
+                f"\nOverall: {result.get('successful_chapters', 0)} succeeded, "
+                f"{result.get('total_chapters', 0)} total chapters, "
+                f"{result.get('total_chunks', 0)} total chunks"
+            )
+
+            return 0 if result.get("committed") else 1
+
+        else:
+            # Non-transactional: process each textbook separately
+            total_successful = 0
+            total_skipped = 0
+            total_failed = 0
+            total_files = 0
+
+            for textbook in textbooks:
+                textbook_dir = base_dir / textbook
+                if not textbook_dir.exists():
+                    logger.warning(f"Directory not found, skipping: {textbook_dir}")
+                    continue
+
+                logger.info(f"Processing textbook: {textbook}")
+                result = pipeline.ingest_directory(str(textbook_dir), force=args.force)
+
+                total_successful += result.get("successful_count", 0)
+                total_skipped += result.get("skipped_count", 0)
+                total_failed += result.get("failed_count", 0)
+                total_files += result.get("total_files", 0)
+
+                logger.info(
+                    f"{textbook}: {result.get('successful_count', 0)} succeeded, "
+                    f"{result.get('skipped_count', 0)} skipped, {result.get('failed_count', 0)} failed"
+                )
+
+            logger.info(
+                f"\nOverall: {total_successful} succeeded, {total_skipped} skipped, "
+                f"{total_failed} failed (total: {total_files} files)"
+            )
+
+            return 0 if total_failed == 0 else 1
 
     except Exception as e:
         logger.error(f"Error during batch ingestion: {e}", exc_info=args.verbose)
