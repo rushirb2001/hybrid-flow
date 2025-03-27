@@ -15,7 +15,7 @@ class EmbeddingGenerator:
         Args:
             model_name: Name of the sentence transformer model to use
         """
-        self.model = SentenceTransformer(model_name)
+        self.model = SentenceTransformer(model_name, device="mps")
         self.model_name = model_name
         self.vector_size = 384
 
@@ -31,14 +31,23 @@ class EmbeddingGenerator:
         embedding = self.model.encode(text, convert_to_numpy=True)
         return embedding.tolist()
 
-    def generate_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+    def generate_batch_embeddings(
+        self, texts: List[str], batch_size: int = 64, show_progress: bool = True
+    ) -> List[List[float]]:
         """Generate embeddings for multiple texts in batch.
 
         Args:
             texts: List of input texts to encode
+            batch_size: Number of texts to process per batch (default: 64)
+            show_progress: Whether to show progress bar (default: True)
 
         Returns:
             List of embedding vectors as lists of floats
         """
-        embeddings = self.model.encode(texts, convert_to_numpy=True, batch_size=32)
+        embeddings = self.model.encode(
+            texts,
+            convert_to_numpy=True,
+            batch_size=batch_size,
+            show_progress_bar=show_progress,
+        )
         return embeddings.tolist()

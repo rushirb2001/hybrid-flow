@@ -110,16 +110,29 @@ class Neo4jStorage:
         return f"(:{node_type}{version_labels} {properties})"
 
     def create_constraints(self) -> None:
-        """Create uniqueness constraints for key node types."""
+        """Create uniqueness constraints and indexes for key node types.
+
+        Creates indexes on Section, Subsection, and Subsubsection IDs
+        for fast parent lookups during paragraph ingestion.
+        """
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Textbook) REQUIRE t.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Chapter) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Paragraph) REQUIRE p.chunk_id IS UNIQUE",
         ]
 
+        # Indexes for fast parent lookups during ingestion
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS FOR (s:Section) ON (s.id)",
+            "CREATE INDEX IF NOT EXISTS FOR (ss:Subsection) ON (ss.id)",
+            "CREATE INDEX IF NOT EXISTS FOR (sss:Subsubsection) ON (sss.id)",
+        ]
+
         with self.driver.session() as session:
             for constraint in constraints:
                 session.run(constraint)
+            for index in indexes:
+                session.run(index)
 
     def upsert_textbook(self, textbook_id: str, name: str, version_id: Optional[str] = None) -> None:
         """Insert or update a textbook node.
@@ -1808,6 +1821,403 @@ class Neo4jStorage:
                 "sample_only_neo4j": list(in_neo4j_not_qdrant)[:10],
                 "sample_only_qdrant": list(in_qdrant_not_neo4j)[:10],
             }
+
+    def batch_upsert_hierarchy(
+        self,
+        textbook_id: str,
+        textbook_name: str,
+        chapter_number: str,
+        chapter_title: str,
+        chapter_version: int,
+        sections: List[Dict[str, Any]],
+        subsections: List[Dict[str, Any]],
+        subsubsections: List[Dict[str, Any]],
+        version_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Batch upsert hierarchy nodes (textbook, chapter, sections, subsections, subsubsections).
+
+        Uses UNWIND for efficient batch operations in a single session.
+
+        Args:
+            textbook_id: Textbook identifier
+            textbook_name: Full name of the textbook
+            chapter_number: Chapter number
+            chapter_title: Chapter title
+            chapter_version: Version number for the chapter
+            sections: List of section dicts with keys: chapter_id, number, title
+            subsections: List of subsection dicts with keys: section_id, number, title
+            subsubsections: List of subsubsection dicts with keys: subsection_id, number, title
+            version_id: Optional version identifier for multi-version support
+
+        Returns:
+            Dict with counts of upserted nodes by type
+
+        Example:
+            >>> storage.batch_upsert_hierarchy(
+            ...     textbook_id='bailey',
+            ...     textbook_name='Bailey & Love',
+            ...     chapter_number='60',
+            ...     chapter_title='The Thorax',
+            ...     chapter_version=1,
+            ...     sections=[{'chapter_id': 'bailey:ch60', 'number': '1', 'title': 'Intro'}],
+            ...     subsections=[],
+            ...     subsubsections=[],
+            ...     version_id='staging_123'
+            ... )
+            {'textbook': 1, 'chapter': 1, 'sections': 1, 'subsections': 0, 'subsubsections': 0}
+        """
+        counts = {'textbook': 0, 'chapter': 0, 'sections': 0, 'subsections': 0, 'subsubsections': 0}
+
+        with self.driver.session() as session:
+            # Upsert textbook
+            actual_textbook_id = self._versioned_id(textbook_id, version_id)
+            session.run(
+                """
+                MERGE (t:Textbook {id: $actual_id})
+                SET t.name = $name, t.original_id = $original_id
+                """,
+                actual_id=actual_textbook_id,
+                name=textbook_name,
+                original_id=textbook_id,
+            )
+            counts['textbook'] = 1
+
+            # Upsert chapter
+            chapter_id = f"{textbook_id}:ch{chapter_number}"
+            actual_chapter_id = self._versioned_id(chapter_id, version_id)
+            session.run(
+                """
+                MERGE (t:Textbook {id: $actual_textbook_id})
+                MERGE (c:Chapter {id: $actual_chapter_id})
+                SET c.number = $chapter_number, c.title = $title, c.version = $version, c.original_id = $original_id
+                MERGE (t)-[:CONTAINS]->(c)
+                """,
+                actual_textbook_id=actual_textbook_id,
+                actual_chapter_id=actual_chapter_id,
+                original_id=chapter_id,
+                chapter_number=chapter_number,
+                title=chapter_title,
+                version=chapter_version,
+            )
+            counts['chapter'] = 1
+
+            # Batch upsert sections using UNWIND
+            if sections:
+                section_data = []
+                for sec in sections:
+                    section_id = f"{sec['chapter_id']}:s{sec['number']}"
+                    section_data.append({
+                        'actual_chapter_id': self._versioned_id(sec['chapter_id'], version_id),
+                        'actual_section_id': self._versioned_id(section_id, version_id),
+                        'original_id': section_id,
+                        'number': sec['number'],
+                        'title': sec['title'],
+                    })
+
+                result = session.run(
+                    """
+                    UNWIND $sections AS sec
+                    MERGE (c:Chapter {id: sec.actual_chapter_id})
+                    MERGE (s:Section {id: sec.actual_section_id})
+                    SET s.number = sec.number, s.title = sec.title, s.original_id = sec.original_id
+                    MERGE (c)-[:HAS_SECTION]->(s)
+                    RETURN count(s) as count
+                    """,
+                    sections=section_data,
+                )
+                counts['sections'] = result.single()['count']
+
+            # Batch upsert subsections using UNWIND
+            if subsections:
+                subsection_data = []
+                for subsec in subsections:
+                    subsection_id = f"{subsec['section_id']}:ss{subsec['number']}"
+                    subsection_data.append({
+                        'actual_section_id': self._versioned_id(subsec['section_id'], version_id),
+                        'actual_subsection_id': self._versioned_id(subsection_id, version_id),
+                        'original_id': subsection_id,
+                        'number': subsec['number'],
+                        'title': subsec['title'],
+                    })
+
+                result = session.run(
+                    """
+                    UNWIND $subsections AS subsec
+                    MERGE (s:Section {id: subsec.actual_section_id})
+                    MERGE (ss:Subsection {id: subsec.actual_subsection_id})
+                    SET ss.number = subsec.number, ss.title = subsec.title, ss.original_id = subsec.original_id
+                    MERGE (s)-[:HAS_SUBSECTION]->(ss)
+                    RETURN count(ss) as count
+                    """,
+                    subsections=subsection_data,
+                )
+                counts['subsections'] = result.single()['count']
+
+            # Batch upsert subsubsections using UNWIND
+            if subsubsections:
+                subsubsection_data = []
+                for subsubsec in subsubsections:
+                    subsubsection_id = f"{subsubsec['subsection_id']}:sss{subsubsec['number']}"
+                    subsubsection_data.append({
+                        'actual_subsection_id': self._versioned_id(subsubsec['subsection_id'], version_id),
+                        'actual_subsubsection_id': self._versioned_id(subsubsection_id, version_id),
+                        'original_id': subsubsection_id,
+                        'number': subsubsec['number'],
+                        'title': subsubsec['title'],
+                    })
+
+                result = session.run(
+                    """
+                    UNWIND $subsubsections AS subsubsec
+                    MERGE (ss:Subsection {id: subsubsec.actual_subsection_id})
+                    MERGE (sss:Subsubsection {id: subsubsec.actual_subsubsection_id})
+                    SET sss.number = subsubsec.number, sss.title = subsubsec.title, sss.original_id = subsubsec.original_id
+                    MERGE (ss)-[:HAS_SUBSUBSECTION]->(sss)
+                    RETURN count(sss) as count
+                    """,
+                    subsubsections=subsubsection_data,
+                )
+                counts['subsubsections'] = result.single()['count']
+
+        return counts
+
+    def batch_upsert_paragraphs(
+        self,
+        paragraphs: List[Dict[str, Any]],
+        version_id: Optional[str] = None,
+        batch_size: int = 500,
+    ) -> int:
+        """Batch upsert paragraph nodes with their parent relationships.
+
+        Uses UNWIND for efficient batch operations, processing in configurable batch sizes
+        to avoid memory issues with large datasets. Creates paragraphs first, then
+        links to parents in separate optimized queries by parent type.
+
+        Args:
+            paragraphs: List of paragraph dicts with keys:
+                - parent_id: Parent node ID (section/subsection/subsubsection)
+                - paragraph_number: Paragraph number
+                - text: Paragraph text content
+                - chunk_id: Unique chunk identifier
+                - page: Page number
+                - bounds: Bounding box [x1, y1, x2, y2]
+                - cross_references: Optional list of cross-references (will be JSON serialized)
+            version_id: Optional version identifier for multi-version support
+            batch_size: Number of paragraphs to process per batch (default: 500)
+
+        Returns:
+            int: Total number of paragraphs upserted
+
+        Example:
+            >>> paragraphs = [
+            ...     {'parent_id': 'bailey:ch60:s2', 'paragraph_number': '2.1',
+            ...      'text': 'Lorem ipsum...', 'chunk_id': 'bailey:ch60:2.1',
+            ...      'page': 1025, 'bounds': [100, 200, 500, 250], 'cross_references': []}
+            ... ]
+            >>> count = storage.batch_upsert_paragraphs(paragraphs, version_id='staging_123')
+            >>> print(f'Upserted {count} paragraphs')
+        """
+        if not paragraphs:
+            return 0
+
+        total_upserted = 0
+
+        with self.driver.session() as session:
+            # Process in batches to avoid memory issues
+            for i in range(0, len(paragraphs), batch_size):
+                batch = paragraphs[i:i + batch_size]
+
+                # Prepare batch data with versioned IDs and JSON-serialized cross_references
+                # Also categorize by parent type for efficient linking
+                batch_data = []
+                section_links = []
+                subsection_links = []
+                subsubsection_links = []
+
+                for p in batch:
+                    cross_refs = p.get('cross_references', [])
+                    cross_refs_json = json.dumps(cross_refs) if cross_refs else '[]'
+                    actual_parent_id = self._versioned_id(p['parent_id'], version_id)
+                    actual_chunk_id = self._versioned_id(p['chunk_id'], version_id)
+
+                    batch_data.append({
+                        'actual_chunk_id': actual_chunk_id,
+                        'original_chunk_id': p['chunk_id'],
+                        'paragraph_number': p['paragraph_number'],
+                        'text': p['text'],
+                        'page': p['page'],
+                        'bounds': p['bounds'],
+                        'cross_references': cross_refs_json,
+                    })
+
+                    # Categorize parent link by type (based on ID pattern)
+                    link_data = {'parent_id': actual_parent_id, 'chunk_id': actual_chunk_id}
+                    if ':sss' in p['parent_id']:
+                        subsubsection_links.append(link_data)
+                    elif ':ss' in p['parent_id']:
+                        subsection_links.append(link_data)
+                    else:
+                        section_links.append(link_data)
+
+                # Step 1: Create all paragraph nodes (fast, no parent lookup)
+                result = session.run(
+                    """
+                    UNWIND $paragraphs AS p
+                    MERGE (para:Paragraph {chunk_id: p.actual_chunk_id})
+                    SET para.number = p.paragraph_number,
+                        para.text = p.text,
+                        para.page = p.page,
+                        para.bounds = p.bounds,
+                        para.cross_references = p.cross_references,
+                        para.original_chunk_id = p.original_chunk_id
+                    RETURN count(para) as count
+                    """,
+                    paragraphs=batch_data,
+                )
+                total_upserted += result.single()['count']
+
+                # Step 2: Link to Section parents (with label for index use)
+                if section_links:
+                    session.run(
+                        """
+                        UNWIND $links AS link
+                        MATCH (parent:Section {id: link.parent_id})
+                        MATCH (para:Paragraph {chunk_id: link.chunk_id})
+                        MERGE (parent)-[:HAS_PARAGRAPH]->(para)
+                        """,
+                        links=section_links,
+                    )
+
+                # Step 3: Link to Subsection parents
+                if subsection_links:
+                    session.run(
+                        """
+                        UNWIND $links AS link
+                        MATCH (parent:Subsection {id: link.parent_id})
+                        MATCH (para:Paragraph {chunk_id: link.chunk_id})
+                        MERGE (parent)-[:HAS_PARAGRAPH]->(para)
+                        """,
+                        links=subsection_links,
+                    )
+
+                # Step 4: Link to Subsubsection parents
+                if subsubsection_links:
+                    session.run(
+                        """
+                        UNWIND $links AS link
+                        MATCH (parent:Subsubsection {id: link.parent_id})
+                        MATCH (para:Paragraph {chunk_id: link.chunk_id})
+                        MERGE (parent)-[:HAS_PARAGRAPH]->(para)
+                        """,
+                        links=subsubsection_links,
+                    )
+
+        return total_upserted
+
+    def batch_upsert_tables(
+        self,
+        tables: List[Dict[str, Any]],
+        version_id: Optional[str] = None,
+    ) -> int:
+        """Batch upsert table nodes linked to paragraphs.
+
+        Args:
+            tables: List of table dicts with keys:
+                - paragraph_chunk_id: Parent paragraph chunk ID
+                - table_number: Table number
+                - description: Table description
+                - page: Page number
+                - bounds: Bounding box [x1, y1, x2, y2]
+                - file_png: Optional PNG file path
+                - file_xlsx: Optional Excel file path
+            version_id: Optional version identifier for multi-version support
+
+        Returns:
+            int: Number of tables upserted
+        """
+        if not tables:
+            return 0
+
+        with self.driver.session() as session:
+            table_data = []
+            for t in tables:
+                table_data.append({
+                    'actual_paragraph_chunk_id': self._versioned_id(t['paragraph_chunk_id'], version_id),
+                    'table_number': t['table_number'],
+                    'description': t['description'],
+                    'page': t['page'],
+                    'bounds': t['bounds'],
+                    'file_png': t.get('file_png', ''),
+                    'file_xlsx': t.get('file_xlsx', ''),
+                })
+
+            result = session.run(
+                """
+                UNWIND $tables AS t
+                MATCH (p:Paragraph {chunk_id: t.actual_paragraph_chunk_id})
+                MERGE (tbl:Table {paragraph_id: t.actual_paragraph_chunk_id, table_number: t.table_number})
+                SET tbl.file_png = t.file_png,
+                    tbl.file_xlsx = t.file_xlsx,
+                    tbl.description = t.description,
+                    tbl.page = t.page,
+                    tbl.bounds = t.bounds
+                MERGE (p)-[:CONTAINS_TABLE]->(tbl)
+                RETURN count(tbl) as count
+                """,
+                tables=table_data,
+            )
+            return result.single()['count']
+
+    def batch_upsert_figures(
+        self,
+        figures: List[Dict[str, Any]],
+        version_id: Optional[str] = None,
+    ) -> int:
+        """Batch upsert figure nodes linked to paragraphs.
+
+        Args:
+            figures: List of figure dicts with keys:
+                - paragraph_chunk_id: Parent paragraph chunk ID
+                - figure_number: Figure number
+                - caption: Figure caption
+                - page: Page number
+                - bounds: Bounding box [x1, y1, x2, y2]
+                - file_png: Optional PNG file path
+            version_id: Optional version identifier for multi-version support
+
+        Returns:
+            int: Number of figures upserted
+        """
+        if not figures:
+            return 0
+
+        with self.driver.session() as session:
+            figure_data = []
+            for f in figures:
+                figure_data.append({
+                    'actual_paragraph_chunk_id': self._versioned_id(f['paragraph_chunk_id'], version_id),
+                    'figure_number': f['figure_number'],
+                    'caption': f['caption'],
+                    'page': f['page'],
+                    'bounds': f['bounds'],
+                    'file_png': f.get('file_png', ''),
+                })
+
+            result = session.run(
+                """
+                UNWIND $figures AS f
+                MATCH (p:Paragraph {chunk_id: f.actual_paragraph_chunk_id})
+                MERGE (fig:Figure {paragraph_id: f.actual_paragraph_chunk_id, figure_number: f.figure_number})
+                SET fig.file_png = f.file_png,
+                    fig.caption = f.caption,
+                    fig.page = f.page,
+                    fig.bounds = f.bounds
+                MERGE (p)-[:CONTAINS_FIGURE]->(fig)
+                RETURN count(fig) as count
+                """,
+                figures=figure_data,
+            )
+            return result.single()['count']
 
     def close(self) -> None:
         """Close the Neo4j driver connection."""

@@ -45,6 +45,18 @@ class IngestionTransaction:
         # Create safety backup before starting transaction
         self.safety_backup_id = self.pipeline._create_safety_backup()
         self.version_id = self.pipeline._generate_version_id("staging")
+
+        # Register the staging version in version_registry
+        self.pipeline.metadata_db.register_version(
+            version_id=self.version_id,
+            description=self.description or f"Staging transaction {self.version_id}",
+            sqlite_snapshot=f"chapter_metadata_{self.version_id}",
+            qdrant_snapshot=f"textbook_chunks_{self.version_id}",
+            neo4j_snapshot=self.version_id,
+        )
+        # Update status to staging
+        self.pipeline.metadata_db.update_version_status(self.version_id, "staging")
+
         self.started = True
         return self
 
@@ -71,9 +83,30 @@ class IngestionTransaction:
                 self.pipeline._restore_from_safety_backup(self.safety_backup_id)
             return False
 
+        # Count successful chapter ingestions
+        successful_chapters = sum(
+            1 for op in self.operations
+            if op["type"] == "ingest_chapter" and op["status"] == "success"
+        )
+
+        # If no chapters were actually ingested (all skipped), skip validation and commit
+        if successful_chapters == 0:
+            self.pipeline.logger.info(
+                f"No chapters ingested in transaction {self.version_id}, skipping commit"
+            )
+            # Update version status to indicate no-op
+            self.pipeline.metadata_db.update_version_status(self.version_id, "skipped")
+            # Cleanup safety backup
+            self.pipeline._cleanup_safety_backup(self.safety_backup_id)
+            return False
+
         # Validate ingestion before committing
         validation = self.pipeline._validate_ingestion(self.version_id)
         if validation["status"] == "pass":
+            # Update chapters count before committing
+            self.pipeline.metadata_db.update_version_chapters_count(
+                self.version_id, successful_chapters
+            )
             self.pipeline._commit_version(self.version_id)
             self.committed = True
             # Cleanup safety backup on successful commit
@@ -200,6 +233,10 @@ class IngestionPipeline:
     ) -> Dict:
         """Ingest a single chapter from JSON file into all storage backends.
 
+        Uses batch operations for Neo4j to dramatically improve performance.
+        Previously: ~50-100+ individual session operations per chapter
+        Now: ~5-6 batch operations per chapter (one session each)
+
         Args:
             file_path: Path to chapter JSON file
             force: If True, force re-ingestion even if content unchanged
@@ -245,32 +282,29 @@ class IngestionPipeline:
             chunk_texts = [paragraph.text for _, paragraph, _ in chunks]
             embeddings = self.embedder.generate_batch_embeddings(chunk_texts)
 
-            # Upsert textbook node in Neo4j
+            # Prepare data for batch Neo4j operations
             textbook_name_map = {
                 "bailey": "Bailey & Love's Short Practice of Surgery",
                 "sabiston": "Sabiston Textbook of Surgery",
                 "schwartz": "Schwartz's Principles of Surgery",
             }
-            self.neo4j_storage.upsert_textbook(
-                textbook_id=chapter.textbook_id.value,
-                name=textbook_name_map.get(chapter.textbook_id.value, chapter.textbook_id.value),
-                version_id=version_id,
-            )
-
-            # Upsert chapter node in Neo4j
             version = existing.version + 1 if existing else 1
-            self.neo4j_storage.upsert_chapter(
-                textbook_id=chapter.textbook_id.value,
-                chapter_number=chapter.chapter_number,
-                title=chapter.title,
-                version=version,
-                version_id=version_id,
-            )
+            chapter_id = f"{chapter.textbook_id.value}:ch{chapter.chapter_number}"
+
+            # Collect unique sections, subsections, subsubsections
+            sections_data = {}
+            subsections_data = {}
+            subsubsections_data = {}
+
+            # Collect paragraphs, tables, figures for batch upsert
+            paragraphs_data = []
+            tables_data = []
+            figures_data = []
 
             # Prepare Qdrant chunks for batch upsert
             qdrant_chunks = []
 
-            # Process each chunk
+            # Process each chunk - collect data for batch operations
             for (chunk_id, paragraph, hierarchy_path), embedding in zip(chunks, embeddings):
                 # Build full hierarchy path for metadata
                 metadata = {
@@ -282,7 +316,6 @@ class IngestionPipeline:
                 }
 
                 # Determine parent ID based on paragraph number structure
-                # Format: ch2:2.1.1 -> parent could be section, subsection, or subsubsection
                 parts = paragraph.number.split(".")
 
                 # Find matching section/subsection/subsubsection
@@ -307,106 +340,136 @@ class IngestionPipeline:
                             subsubsection = subsubsec
                             break
 
-                # Upsert hierarchy nodes in Neo4j
+                # Collect hierarchy data (deduplicated by ID)
                 if section:
-                    chapter_id = f"{chapter.textbook_id.value}:ch{chapter.chapter_number}"
                     section_id = f"{chapter_id}:s{section.number}"
-                    self.neo4j_storage.upsert_section(
-                        chapter_id=chapter_id,
-                        section_number=section.number,
-                        title=section.title,
-                        version_id=version_id,
-                    )
+                    if section_id not in sections_data:
+                        sections_data[section_id] = {
+                            'chapter_id': chapter_id,
+                            'number': section.number,
+                            'title': section.title,
+                        }
+
+                    parent_id = section_id
 
                     if subsection:
                         subsection_id = f"{section_id}:ss{subsection.number}"
-                        self.neo4j_storage.upsert_subsection(
-                            section_id=section_id,
-                            subsection_number=subsection.number,
-                            title=subsection.title,
-                            version_id=version_id,
-                        )
+                        if subsection_id not in subsections_data:
+                            subsections_data[subsection_id] = {
+                                'section_id': section_id,
+                                'number': subsection.number,
+                                'title': subsection.title,
+                            }
+
+                        parent_id = subsection_id
 
                         if subsubsection:
                             subsubsection_id = f"{subsection_id}:sss{subsubsection.number}"
-                            self.neo4j_storage.upsert_subsubsection(
-                                subsection_id=subsection_id,
-                                subsubsection_number=subsubsection.number,
-                                title=subsubsection.title,
-                                version_id=version_id,
-                            )
+                            if subsubsection_id not in subsubsections_data:
+                                subsubsections_data[subsubsection_id] = {
+                                    'subsection_id': subsection_id,
+                                    'number': subsubsection.number,
+                                    'title': subsubsection.title,
+                                }
+
                             parent_id = subsubsection_id
-                        else:
-                            parent_id = subsection_id
-                    else:
-                        parent_id = section_id
 
                     # Extract cross-references from paragraph text
                     cross_references = self.chunk_generator.extract_references(paragraph.text)
 
-                    # Upsert paragraph node with cross-references
-                    self.neo4j_storage.upsert_paragraph(
-                        parent_id=parent_id,
-                        paragraph_number=paragraph.number,
-                        text=paragraph.text,
-                        chunk_id=chunk_id,
-                        page=paragraph.page,
-                        bounds=[
+                    # Collect paragraph data
+                    paragraphs_data.append({
+                        'parent_id': parent_id,
+                        'paragraph_number': paragraph.number,
+                        'text': paragraph.text,
+                        'chunk_id': chunk_id,
+                        'page': paragraph.page,
+                        'bounds': [
                             paragraph.bounds.x1,
                             paragraph.bounds.y1,
                             paragraph.bounds.x2,
                             paragraph.bounds.y2,
                         ],
-                        cross_references=cross_references,
-                        version_id=version_id,
-                    )
+                        'cross_references': cross_references,
+                    })
 
-                    # Upsert tables if present
+                    # Collect tables if present
                     if paragraph.tables:
                         for table in paragraph.tables:
-                            self.neo4j_storage.upsert_table(
-                                paragraph_chunk_id=chunk_id,
-                                table_number=table.table_number,
-                                description=table.description,
-                                page=table.page,
-                                bounds=[
+                            tables_data.append({
+                                'paragraph_chunk_id': chunk_id,
+                                'table_number': table.table_number,
+                                'description': table.description,
+                                'page': table.page,
+                                'bounds': [
                                     table.bounds.x1,
                                     table.bounds.y1,
                                     table.bounds.x2,
                                     table.bounds.y2,
                                 ],
-                                version_id=version_id,
-                            )
+                            })
 
-                    # Upsert figures if present
+                    # Collect figures if present
                     if paragraph.figures:
                         for figure in paragraph.figures:
-                            self.neo4j_storage.upsert_figure(
-                                paragraph_chunk_id=chunk_id,
-                                figure_number=figure.figure_number,
-                                caption=figure.caption,
-                                page=figure.page,
-                                bounds=[
+                            figures_data.append({
+                                'paragraph_chunk_id': chunk_id,
+                                'figure_number': figure.figure_number,
+                                'caption': figure.caption,
+                                'page': figure.page,
+                                'bounds': [
                                     figure.bounds.x1,
                                     figure.bounds.y1,
                                     figure.bounds.x2,
                                     figure.bounds.y2,
                                 ],
-                                version_id=version_id,
-                            )
+                            })
 
                 # Collect for Qdrant batch upsert
                 qdrant_chunks.append((chunk_id, paragraph.text, metadata, embedding))
 
-            # Batch upsert to Qdrant
+            # Execute batch Neo4j operations
+            # 1. Batch upsert hierarchy (textbook, chapter, sections, subsections, subsubsections)
+            self.neo4j_storage.batch_upsert_hierarchy(
+                textbook_id=chapter.textbook_id.value,
+                textbook_name=textbook_name_map.get(chapter.textbook_id.value, chapter.textbook_id.value),
+                chapter_number=chapter.chapter_number,
+                chapter_title=chapter.title,
+                chapter_version=version,
+                sections=list(sections_data.values()),
+                subsections=list(subsections_data.values()),
+                subsubsections=list(subsubsections_data.values()),
+                version_id=version_id,
+            )
+
+            # 2. Batch upsert paragraphs
+            self.neo4j_storage.batch_upsert_paragraphs(
+                paragraphs=paragraphs_data,
+                version_id=version_id,
+            )
+
+            # 3. Batch upsert tables
+            if tables_data:
+                self.neo4j_storage.batch_upsert_tables(
+                    tables=tables_data,
+                    version_id=version_id,
+                )
+
+            # 4. Batch upsert figures
+            if figures_data:
+                self.neo4j_storage.batch_upsert_figures(
+                    figures=figures_data,
+                    version_id=version_id,
+                )
+
+            # 5. Batch upsert to Qdrant
             if qdrant_chunks:
                 self.qdrant_storage.upsert_chunks(qdrant_chunks, version_id=version_id)
 
             # Upsert chapter metadata (metadata DB doesn't use versioning)
             self.metadata_db.upsert_chapter(chapter)
 
-            # Link sequential paragraphs with NEXT/PREV relationships
-            chapter_id = f"{chapter.textbook_id.value}:ch{chapter.chapter_number}"
+            # 6. Link sequential paragraphs with NEXT/PREV relationships
             links_created = self.neo4j_storage.link_sequential_paragraphs(
                 chapter_id, version_id=version_id
             )
@@ -497,10 +560,12 @@ class IngestionPipeline:
         Returns:
             Dict with ingestion results, version_id, and committed status
         """
+        result = None
         with IngestionTransaction(self, description) as txn:
             result = self.ingest_chapter(file_path, force=force, version_id=txn.version_id)
             txn.track_operation("ingest_chapter", file_path, result["status"])
-            return {**result, "version_id": txn.version_id, "committed": txn.committed}
+        # Return after __exit__ is called so txn.committed is correctly set
+        return {**result, "version_id": txn.version_id, "committed": txn.committed}
 
     def ingest_directory_transactional(
         self, directory_path: str, description: str = "", force: bool = False, validate_every: int = 0
@@ -523,9 +588,8 @@ class IngestionPipeline:
         import glob
         import os
 
+        results = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
         with IngestionTransaction(self, description) as txn:
-            results = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
-
             # Get all JSON files
             files = sorted(glob.glob(os.path.join(directory_path, "*.json")))
 
@@ -569,7 +633,8 @@ class IngestionPipeline:
                 f"{results['skipped']} skipped, {results['failed']} failed"
             )
 
-            return {**results, "version_id": txn.version_id, "committed": txn.committed}
+        # Return after __exit__ is called so txn.committed is correctly set
+        return {**results, "version_id": txn.version_id, "committed": txn.committed}
 
     def ingest_all_transactional(
         self, data_dir: str = "data", description: str = "", force: bool = False, validate_every: int = 0
@@ -592,9 +657,8 @@ class IngestionPipeline:
         import glob
         import os
 
+        results = {"textbooks": {}, "total_chapters": 0, "total_chunks": 0, "successful_chapters": 0}
         with IngestionTransaction(self, description) as txn:
-            results = {"textbooks": {}, "total_chapters": 0, "total_chunks": 0, "successful_chapters": 0}
-
             # Loop through textbook directories
             for textbook in ["bailey", "sabiston", "schwartz"]:
                 textbook_path = os.path.join(data_dir, textbook)
@@ -633,7 +697,8 @@ class IngestionPipeline:
                         f"Completed {textbook}: {results['textbooks'][textbook]['success']}/{len(files)}"
                     )
 
-            return {**results, "version_id": txn.version_id, "committed": txn.committed}
+        # Return after __exit__ is called so txn.committed is correctly set
+        return {**results, "version_id": txn.version_id, "committed": txn.committed}
 
     def _generate_version_id(self, prefix: str = "v") -> str:
         """Generate a unique version ID with timestamp.
