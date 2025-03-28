@@ -8,10 +8,10 @@ import sys
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
-from qdrant_client import QdrantClient
 
 from hybridflow.models import ExpansionConfig
 from hybridflow.retrieval.query import QueryEngine
+from hybridflow.storage.qdrant_client import QdrantStorage
 
 load_dotenv()
 
@@ -31,7 +31,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     )
 
     try:
-        qdrant_client = QdrantClient(
+        qdrant_storage = QdrantStorage(
             host=os.getenv("QDRANT_HOST", "localhost"),
             port=int(os.getenv("QDRANT_PORT", "6333")),
         )
@@ -45,8 +45,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         )
 
         engine = QueryEngine(
-            qdrant_client=qdrant_client,
+            qdrant_client=qdrant_storage.client,
             neo4j_driver=neo4j_driver,
+            collection_name=qdrant_storage.read_collection,
         )
 
         # TASK 5.3: Determine expansion config based on CLI flags
@@ -156,14 +157,15 @@ def cmd_get_hierarchy(args: argparse.Namespace) -> int:
             ),
         )
 
-        qdrant_client = QdrantClient(
+        qdrant_storage = QdrantStorage(
             host=os.getenv("QDRANT_HOST", "localhost"),
             port=int(os.getenv("QDRANT_PORT", "6333")),
         )
 
         engine = QueryEngine(
-            qdrant_client=qdrant_client,
+            qdrant_client=qdrant_storage.client,
             neo4j_driver=neo4j_driver,
+            collection_name=qdrant_storage.read_collection,
         )
 
         structure = engine.get_chapter_structure(args.chapter_id)
