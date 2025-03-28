@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Generator
 
 import pytest
-from qdrant_client import QdrantClient
-from neo4j import GraphDatabase
+
+from hybridflow.storage.qdrant_client import QdrantStorage
+from hybridflow.storage.neo4j_client import Neo4jStorage
 
 
 @pytest.fixture(scope="session")
@@ -48,11 +49,14 @@ def temp_db_path() -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def qdrant_test_client() -> Generator[QdrantClient, None, None]:
-    """Provide a Qdrant test client with in-memory storage."""
-    client = QdrantClient(":memory:")
-    yield client
-    # Cleanup happens automatically with in-memory storage
+def qdrant_test_storage() -> Generator[QdrantStorage, None, None]:
+    """Provide a Qdrant test storage with production connection."""
+    storage = QdrantStorage(
+        host=os.getenv("QDRANT_HOST", "localhost"),
+        port=int(os.getenv("QDRANT_PORT", "6333")),
+    )
+    yield storage
+    # No cleanup - preserve production data
 
 
 @pytest.fixture
@@ -86,19 +90,16 @@ def neo4j_password() -> str:
 
 
 @pytest.fixture
-def neo4j_test_driver(
+def neo4j_test_storage(
     neo4j_uri: str, neo4j_user: str, neo4j_password: str
-) -> Generator[GraphDatabase.driver, None, None]:
-    """Provide a Neo4j test driver connection."""
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+) -> Generator[Neo4jStorage, None, None]:
+    """Provide a Neo4j test storage connection."""
+    storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
 
-    yield driver
+    yield storage
 
-    # Cleanup: Clear test data
-    with driver.session() as session:
-        session.run("MATCH (n) DETACH DELETE n")
-
-    driver.close()
+    # No cleanup - preserve production data
+    storage.close()
 
 
 @pytest.fixture

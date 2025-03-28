@@ -11,7 +11,7 @@ from hybridflow.ingestion.pipeline import IngestionPipeline
 def pipeline(tmp_path):
     """Create an IngestionPipeline with test database connections."""
     pipeline_instance = IngestionPipeline(
-        qdrant_host="localhost",
+        qdrant_host="localhost", 
         qdrant_port=6333,
         neo4j_uri="bolt://localhost:7687",
         neo4j_user="neo4j",
@@ -25,56 +25,68 @@ def pipeline(tmp_path):
 
 @pytest.fixture
 def bailey_chapter_file(tmp_path):
-    """Create a complete Bailey chapter JSON file for testing."""
+    """Create a complete Bailey chapter JSON file for testing.
+
+    Uses chapter 99 which doesn't exist in production to avoid conflicts.
+    The loader detects 'bailey' from the path and uses TextbookEnum.BAILEY.
+    Structure matches actual data format with bounds as array [x1, y1, x2, y2].
+    """
     data = {
-        "chapter_number": "2",
-        "title": "Shock and blood transfusion",
+        "chapter_number": "99",
+        "title": "Test Chapter for Pipeline",
+        "key_points": [],
         "sections": [
             {
-                "title": "Introduction to Shock",
-                "number": "2",
+                "title": "Introduction",
+                "number": "1",
+                "subsections": [],
                 "paragraphs": [
                     {
-                        "number": "2.1",
-                        "text": "Shock is a life-threatening condition characterized by inadequate tissue perfusion.",
+                        "number": "1.1",
+                        "text": "This is the first test paragraph for pipeline testing.",
                         "page": 10,
-                        "bounds": {"x1": 50.0, "y1": 100.0, "x2": 500.0, "y2": 120.0},
+                        "bounds": [50.0, 100.0, 500.0, 120.0],
                     },
                     {
-                        "number": "2.2",
-                        "text": "Early recognition and treatment are critical for patient survival.",
+                        "number": "1.2",
+                        "text": "This is the second test paragraph with more content.",
                         "page": 10,
-                        "bounds": {"x1": 50.0, "y1": 125.0, "x2": 500.0, "y2": 145.0},
+                        "bounds": [50.0, 125.0, 500.0, 145.0],
                     },
                 ],
+            },
+            {
+                "title": "Main Content",
+                "number": "2",
+                "paragraphs": [],
                 "subsections": [
                     {
-                        "title": "Types of Shock",
+                        "title": "Subsection One",
                         "number": "2.1",
                         "paragraphs": [
                             {
                                 "number": "2.1.1",
-                                "text": "Hypovolemic shock results from decreased blood volume.",
+                                "text": "Content for subsection paragraph one.",
                                 "page": 11,
-                                "bounds": {"x1": 50.0, "y1": 100.0, "x2": 500.0, "y2": 120.0},
+                                "bounds": [50.0, 100.0, 500.0, 120.0],
                             },
                             {
                                 "number": "2.1.2",
-                                "text": "Cardiogenic shock occurs when the heart cannot pump effectively.",
+                                "text": "Content for subsection paragraph two.",
                                 "page": 11,
-                                "bounds": {"x1": 50.0, "y1": 125.0, "x2": 500.0, "y2": 145.0},
+                                "bounds": [50.0, 125.0, 500.0, 145.0],
                             },
                         ],
                         "subsubsections": [
                             {
-                                "title": "Hemorrhagic Shock",
+                                "title": "Deep Nested Section",
                                 "number": "2.1.1",
                                 "paragraphs": [
                                     {
                                         "number": "2.1.1.1",
-                                        "text": "Hemorrhagic shock is the most common type of hypovolemic shock in trauma patients.",
+                                        "text": "Content in the deepest level of nesting.",
                                         "page": 12,
-                                        "bounds": {"x1": 50.0, "y1": 100.0, "x2": 500.0, "y2": 120.0},
+                                        "bounds": [50.0, 100.0, 500.0, 120.0],
                                     }
                                 ],
                             }
@@ -83,12 +95,9 @@ def bailey_chapter_file(tmp_path):
                 ],
             }
         ],
-        "authors": ["Dr. Norman Williams", "Dr. Christopher Bulstrode"],
-        "key_points": [],
-        "references": [],
     }
 
-    file_path = tmp_path / "bailey" / "chapter_2.json"
+    file_path = tmp_path / "bailey" / "chapter_99.json"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f)
@@ -154,7 +163,7 @@ def test_ingest_chapter_creates_qdrant_vectors(pipeline, bailey_chapter_file):
         query_filter={
             "must": [
                 {"key": "textbook_id", "match": {"value": "bailey"}},
-                {"key": "chapter_number", "match": {"value": "2"}},
+                {"key": "chapter_number", "match": {"value": "99"}},
             ]
         },
         limit=10,
@@ -165,7 +174,7 @@ def test_ingest_chapter_creates_qdrant_vectors(pipeline, bailey_chapter_file):
     # Should have vectors with proper metadata
     for point in results.points:
         assert point.payload["textbook_id"] == "bailey"
-        assert point.payload["chapter_number"] == "2"
+        assert point.payload["chapter_number"] == "99"
 
 
 def test_ingest_chapter_creates_metadata(pipeline, bailey_chapter_file):
@@ -173,13 +182,13 @@ def test_ingest_chapter_creates_metadata(pipeline, bailey_chapter_file):
     pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
     # Get metadata from database
-    metadata = pipeline.metadata_db.get_chapter_by_id("bailey", "2")
+    metadata = pipeline.metadata_db.get_chapter_by_id("bailey", "99")
 
     assert metadata is not None
     assert metadata.textbook_id == "bailey"
-    assert metadata.chapter_number == "2"
+    assert metadata.chapter_number == "99"
     assert metadata.version >= 1
-    assert metadata.title == "Shock and blood transfusion"
+    assert metadata.title == "Test Chapter for Pipeline"
     assert metadata.content_hash is not None
     assert len(metadata.content_hash) == 64  # SHA256 hash
 
@@ -215,7 +224,7 @@ def test_ingest_modified_chapter_updates(bailey_chapter_file, tmp_path):
         assert result1["status"] == "success"
 
         # Get first version
-        metadata1 = pipeline_instance.metadata_db.get_chapter_by_id("bailey", "2")
+        metadata1 = pipeline_instance.metadata_db.get_chapter_by_id("bailey", "99")
         assert metadata1.version == 1
 
         # Modify the JSON file
@@ -232,7 +241,7 @@ def test_ingest_modified_chapter_updates(bailey_chapter_file, tmp_path):
         assert result2["status"] == "success"
 
         # Check version was incremented
-        metadata2 = pipeline_instance.metadata_db.get_chapter_by_id("bailey", "2")
+        metadata2 = pipeline_instance.metadata_db.get_chapter_by_id("bailey", "99")
         assert metadata2.version == 2
 
     finally:
@@ -246,7 +255,7 @@ def test_ingest_creates_paragraph_links(pipeline, bailey_chapter_file):
     # Query for NEXT/PREV relationships
     query = """
     MATCH (p1:Paragraph)-[:NEXT]->(p2:Paragraph)
-    WHERE p1.chunk_id STARTS WITH 'bailey:ch2:'
+    WHERE p1.chunk_id STARTS WITH 'bailey:ch99:'
     RETURN count(*) as next_links
     """
 
@@ -265,7 +274,7 @@ def test_ingest_paragraphs_connected_to_hierarchy(pipeline, bailey_chapter_file)
     # Query to verify paragraphs are connected to sections/subsections
     query = """
     MATCH (p:Paragraph)
-    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
+    WHERE p.chunk_id STARTS WITH 'bailey:ch99:'
     MATCH (parent)-[:HAS_PARAGRAPH]->(p)
     RETURN labels(parent)[0] as parent_type, count(p) as paragraph_count
     ORDER BY parent_type
@@ -310,15 +319,29 @@ def test_ingest_neo4j_paragraphs_match_qdrant_count(pipeline, bailey_chapter_fil
     """Test that Neo4j paragraph count matches Qdrant vector count for chapter."""
     result = pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
-    # Count paragraphs in Neo4j for this chapter
-    query = """
-    MATCH (p:Paragraph)
-    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
-    RETURN count(p) as paragraph_count
-    """
+    # Count paragraphs in Neo4j for this specific test chapter using version_id
+    version_id = result.get("version_id", "")
+    if version_id:
+        # Filter by version_id suffix
+        query = """
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id STARTS WITH 'bailey:ch99:' AND p.chunk_id ENDS WITH $version_suffix
+        RETURN count(p) as paragraph_count
+        """
+        version_suffix = f"::{version_id}"
+    else:
+        query = """
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id STARTS WITH 'bailey:ch99:'
+        RETURN count(p) as paragraph_count
+        """
+        version_suffix = None
 
     with pipeline.neo4j_storage.driver.session() as session:
-        neo4j_result = session.run(query)
+        if version_suffix:
+            neo4j_result = session.run(query, version_suffix=version_suffix)
+        else:
+            neo4j_result = session.run(query)
         neo4j_count = neo4j_result.single()["paragraph_count"]
 
     # Should match the chunks inserted
@@ -327,19 +350,34 @@ def test_ingest_neo4j_paragraphs_match_qdrant_count(pipeline, bailey_chapter_fil
 
 def test_ingest_chapter_number_format(pipeline, bailey_chapter_file):
     """Test that paragraph numbers follow correct format."""
-    pipeline.ingest_chapter(bailey_chapter_file, force=True)
+    result = pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
-    # Query paragraph numbers
-    query = """
-    MATCH (p:Paragraph)
-    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
-    RETURN p.number as number, p.chunk_id as chunk_id
-    ORDER BY p.number
-    LIMIT 10
-    """
+    # Query paragraph numbers for this specific test using version_id
+    version_id = result.get("version_id", "")
+    if version_id:
+        query = """
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id STARTS WITH 'bailey:ch99:' AND p.chunk_id ENDS WITH $version_suffix
+        RETURN p.number as number, p.chunk_id as chunk_id
+        ORDER BY p.number
+        LIMIT 10
+        """
+        version_suffix = f"::{version_id}"
+    else:
+        query = """
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id STARTS WITH 'bailey:ch99:'
+        RETURN p.number as number, p.chunk_id as chunk_id
+        ORDER BY p.number
+        LIMIT 10
+        """
+        version_suffix = None
 
     with pipeline.neo4j_storage.driver.session() as session:
-        results = session.run(query)
+        if version_suffix:
+            results = session.run(query, version_suffix=version_suffix)
+        else:
+            results = session.run(query)
         records = list(results)
 
     assert len(records) > 0
@@ -348,10 +386,10 @@ def test_ingest_chapter_number_format(pipeline, bailey_chapter_file):
         number = record["number"]
         chunk_id = record["chunk_id"]
 
-        # Paragraph number should match expected format (e.g., "2.1", "2.1.1", "2.1.1.1")
-        assert number.startswith("2")
-        # chunk_id should end with paragraph number
-        assert chunk_id.endswith(f":{number}")
+        # Paragraph number should match expected format (e.g., "1.1", "2.1.1", "2.1.1.1")
+        assert number[0].isdigit()
+        # chunk_id should contain paragraph number (may have version suffix)
+        assert f":{number}" in chunk_id
 
 
 def test_ingest_bounds_stored_correctly(pipeline, bailey_chapter_file):
@@ -361,7 +399,7 @@ def test_ingest_bounds_stored_correctly(pipeline, bailey_chapter_file):
     # Query paragraph with bounds
     query = """
     MATCH (p:Paragraph)
-    WHERE p.chunk_id STARTS WITH 'bailey:ch2:'
+    WHERE p.chunk_id STARTS WITH 'bailey:ch99:'
     RETURN p.bounds as bounds
     LIMIT 1
     """

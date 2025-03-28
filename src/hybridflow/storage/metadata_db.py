@@ -1,7 +1,7 @@
 """Metadata database management for chapter tracking and versioning."""
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from sqlalchemy import create_engine, func, text
@@ -139,7 +139,7 @@ class MetadataDatabase:
                     existing.version += 1
                     existing.content_hash = content_hash
                     existing.title = chapter.title
-                    existing.ingestion_timestamp = datetime.utcnow()
+                    existing.ingestion_timestamp = datetime.now(timezone.utc)
                     existing.source_file_path = chapter.source_file_path
                     session.commit()
                     session.expunge(existing)

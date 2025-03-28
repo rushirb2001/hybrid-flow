@@ -843,6 +843,13 @@ class IngestionPipeline:
     def _validate_ingestion(self, version_id: str) -> Dict[str, Any]:
         """Validate ingestion for a specific version.
 
+        For staging versions (copy-on-write), handles the case where:
+        - Qdrant staging contains copied production data + new data
+        - Neo4j staging only has new versioned data (production wasn't versioned)
+
+        In this case, validation compares NEW data only by subtracting
+        production count from Qdrant staging count.
+
         Args:
             version_id: The version ID to validate
 
@@ -878,13 +885,35 @@ class IngestionPipeline:
         # Cross-system consistency check
         qdrant_count = report["checks"]["qdrant_point_count"]
         neo4j_count = report["checks"]["neo4j_paragraph_count"]
-        report["checks"]["counts_match"] = qdrant_count == neo4j_count
 
-        # If counts don't match, add to errors
-        if not report["checks"]["counts_match"]:
-            report["errors"].append(
-                f"Count mismatch: Qdrant={qdrant_count}, Neo4j={neo4j_count}"
-            )
+        # For staging versions, account for copied production data in Qdrant
+        # Production data is copied to Qdrant staging but Neo4j only has new versioned data
+        if version_id.startswith("staging"):
+            # Get production Qdrant count (main collection without version suffix)
+            production_validation = self.qdrant_storage.validate_collection(None)
+            production_count = production_validation.get("point_count", 0)
+
+            # Calculate new data count: staging total - production copied
+            qdrant_new_count = qdrant_count - production_count
+            report["checks"]["qdrant_production_count"] = production_count
+            report["checks"]["qdrant_new_count"] = qdrant_new_count
+
+            # Compare NEW data counts
+            report["checks"]["counts_match"] = qdrant_new_count == neo4j_count
+
+            if not report["checks"]["counts_match"]:
+                report["errors"].append(
+                    f"Count mismatch: Qdrant new={qdrant_new_count}, Neo4j={neo4j_count} "
+                    f"(Qdrant staging={qdrant_count}, production={production_count})"
+                )
+        else:
+            # Non-staging version: direct comparison
+            report["checks"]["counts_match"] = qdrant_count == neo4j_count
+
+            if not report["checks"]["counts_match"]:
+                report["errors"].append(
+                    f"Count mismatch: Qdrant={qdrant_count}, Neo4j={neo4j_count}"
+                )
 
         # Check for orphan paragraphs
         if neo4j_validation.get("orphan_paragraphs", 0) > 0:

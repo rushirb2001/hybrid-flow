@@ -3,11 +3,11 @@
 import os
 import pytest
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
-from qdrant_client import QdrantClient
 
 from hybridflow.models import ExpansionConfig
 from hybridflow.retrieval.query import QueryEngine
+from hybridflow.storage.qdrant_client import QdrantStorage
+from hybridflow.storage.neo4j_client import Neo4jStorage
 
 # Load environment variables
 load_dotenv()
@@ -16,23 +16,29 @@ load_dotenv()
 @pytest.fixture
 def query_engine():
     """Create QueryEngine instance for testing."""
-    qdrant_client = QdrantClient(
+    qdrant_storage = QdrantStorage(
         host=os.getenv("QDRANT_HOST", "localhost"),
         port=int(os.getenv("QDRANT_PORT", "6333")),
     )
 
-    neo4j_driver = GraphDatabase.driver(
-        os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        auth=(os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", "password")),
+    neo4j_storage = Neo4jStorage(
+        uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        user=os.getenv("NEO4J_USER", "neo4j"),
+        password=os.getenv("NEO4J_PASSWORD", "password"),
     )
 
-    engine = QueryEngine(qdrant_client=qdrant_client, neo4j_driver=neo4j_driver)
+    engine = QueryEngine(
+        qdrant_client=qdrant_storage.client,
+        neo4j_driver=neo4j_storage.driver,
+        collection_name=qdrant_storage.read_collection,
+    )
 
     yield engine
 
     # Cleanup
     engine.close()
-    qdrant_client.close()
+    neo4j_storage.close()
+    qdrant_storage.client.close()
 
 
 class TestCitationFormatting:

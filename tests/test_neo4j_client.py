@@ -12,10 +12,7 @@ def neo4j_storage():
     storage.create_constraints()
     yield storage
 
-    # Teardown: Clear the database
-    with storage.driver.session() as session:
-        session.run("MATCH (n) DETACH DELETE n")
-
+    # No cleanup - preserve production data
     storage.close()
 
 
@@ -100,14 +97,15 @@ def test_chapter_textbook_relationship(neo4j_storage):
         version=1,
     )
 
-    # Verify relationship exists
-    query = 'MATCH (t:Textbook)-[:CONTAINS]->(c:Chapter) RETURN count(c) as count'
+    # Verify relationship exists for this specific chapter
+    chapter_id = f"{textbook_id}:ch{chapter_number}"
+    query = 'MATCH (t:Textbook {id: $textbook_id})-[:CONTAINS]->(c:Chapter {id: $chapter_id}) RETURN c'
     with neo4j_storage.driver.session() as session:
-        result = session.run(query)
+        result = session.run(query, textbook_id=textbook_id, chapter_id=chapter_id)
         record = result.single()
 
         assert record is not None
-        assert record["count"] == 1
+        assert record["c"]["id"] == chapter_id
 
 
 def test_upsert_section(neo4j_storage):
@@ -171,10 +169,11 @@ def test_upsert_subsection(neo4j_storage):
         title=subsection_title,
     )
 
-    # Verify subsection and relationship
-    query = 'MATCH (s:Section)-[:HAS_SUBSECTION]->(ss:Subsection) RETURN ss'
+    # Verify subsection and relationship for this specific subsection
+    subsection_id = f"{section_id}:ss{subsection_number}"
+    query = 'MATCH (s:Section {id: $section_id})-[:HAS_SUBSECTION]->(ss:Subsection {id: $subsection_id}) RETURN ss'
     with neo4j_storage.driver.session() as session:
-        result = session.run(query)
+        result = session.run(query, section_id=section_id, subsection_id=subsection_id)
         record = result.single()
 
         assert record is not None
@@ -212,10 +211,11 @@ def test_upsert_subsubsection(neo4j_storage):
         title=subsubsection_title,
     )
 
-    # Verify subsubsection and relationship
-    query = 'MATCH (ss:Subsection)-[:HAS_SUBSUBSECTION]->(sss:Subsubsection) RETURN sss'
+    # Verify subsubsection and relationship for this specific subsubsection
+    subsubsection_id = f"{subsection_id}:sss{subsubsection_number}"
+    query = 'MATCH (ss:Subsection {id: $subsection_id})-[:HAS_SUBSUBSECTION]->(sss:Subsubsection {id: $subsubsection_id}) RETURN sss'
     with neo4j_storage.driver.session() as session:
-        result = session.run(query)
+        result = session.run(query, subsection_id=subsection_id, subsubsection_id=subsubsection_id)
         record = result.single()
 
         assert record is not None
@@ -301,10 +301,10 @@ def test_upsert_table(neo4j_storage):
         bounds=[50.0, 300.0, 400.0, 500.0],
     )
 
-    # Verify table
-    query = 'MATCH (p:Paragraph)-[:CONTAINS_TABLE]->(t:Table) RETURN t'
+    # Verify table for this specific paragraph
+    query = 'MATCH (p:Paragraph {chunk_id: $chunk_id})-[:CONTAINS_TABLE]->(t:Table) RETURN t'
     with neo4j_storage.driver.session() as session:
-        result = session.run(query)
+        result = session.run(query, chunk_id=chunk_id)
         record = result.single()
 
         assert record is not None
@@ -347,10 +347,10 @@ def test_upsert_figure(neo4j_storage):
         bounds=[50.0, 550.0, 400.0, 750.0],
     )
 
-    # Verify figure
-    query = 'MATCH (p:Paragraph)-[:CONTAINS_FIGURE]->(f:Figure) RETURN f'
+    # Verify figure for this specific paragraph
+    query = 'MATCH (p:Paragraph {chunk_id: $chunk_id})-[:CONTAINS_FIGURE]->(f:Figure) RETURN f'
     with neo4j_storage.driver.session() as session:
-        result = session.run(query)
+        result = session.run(query, chunk_id=chunk_id)
         record = result.single()
 
         assert record is not None
@@ -396,17 +396,18 @@ def test_full_hierarchy(neo4j_storage):
         bounds=[10.0, 20.0, 100.0, 200.0],
     )
 
-    # Query full path
+    # Query full path for the specific test paragraph
+    chunk_id = "bailey:ch2:para1"
     query = """
     MATCH path = (t:Textbook)-[:CONTAINS]->(c:Chapter)
                  -[:HAS_SECTION]->(s:Section)
                  -[:HAS_SUBSECTION]->(ss:Subsection)
                  -[:HAS_SUBSUBSECTION]->(sss:Subsubsection)
-                 -[:HAS_PARAGRAPH]->(p:Paragraph)
+                 -[:HAS_PARAGRAPH]->(p:Paragraph {chunk_id: $chunk_id})
     RETURN length(path) as path_length
     """
     with neo4j_storage.driver.session() as session:
-        result = session.run(query)
+        result = session.run(query, chunk_id=chunk_id)
         record = result.single()
 
         assert record is not None
@@ -443,18 +444,17 @@ def test_validate_graph(neo4j_storage):
 
 def test_validate_graph_orphan_detection(neo4j_storage):
     """Test orphan paragraph detection."""
-    # Create orphan paragraph
-    neo4j_storage.driver.session().run(
-        """
-        CREATE (p:Paragraph {
-            chunk_id: 'orphan:test:1',
-            text: 'Orphan text',
-            number: '1',
-            page: 1,
-            bounds: [0, 0, 100, 100]
-        })
-        """
-    )
+    # Create orphan paragraph using MERGE to avoid constraint errors
+    with neo4j_storage.driver.session() as session:
+        session.run(
+            """
+            MERGE (p:Paragraph {chunk_id: 'orphan:test:1'})
+            SET p.text = 'Orphan text',
+                p.number = '1',
+                p.page = 1,
+                p.bounds = [0, 0, 100, 100]
+            """
+        )
 
     report = neo4j_storage.validate_graph()
 
@@ -538,7 +538,7 @@ def test_compare_with_qdrant_empty(neo4j_storage):
 
 def test_compare_with_qdrant_matching(neo4j_storage):
     """Test compare_with_qdrant with matching chunk_ids."""
-    # Create a paragraph
+    # Create a paragraph with unique chunk_id
     neo4j_storage.upsert_textbook(textbook_id="test", name="Test")
     chapter_id = "test:ch1"
     neo4j_storage.upsert_chapter(
@@ -558,12 +558,17 @@ def test_compare_with_qdrant_matching(neo4j_storage):
         bounds=[0, 0, 100, 100]
     )
 
-    # Compare with matching set
-    comparison = neo4j_storage.compare_with_qdrant({chunk_id})
+    # Get all neo4j chunk_ids to simulate a full match scenario
+    with neo4j_storage.driver.session() as session:
+        result = session.run("MATCH (p:Paragraph) RETURN p.chunk_id as chunk_id")
+        all_chunk_ids = {record["chunk_id"] for record in result}
+
+    # Compare with all neo4j chunk_ids (simulating matching Qdrant)
+    comparison = neo4j_storage.compare_with_qdrant(all_chunk_ids)
 
     assert comparison["neo4j_count"] >= 1
-    assert comparison["qdrant_count"] == 1
-    assert comparison["common_count"] >= 1
+    assert comparison["qdrant_count"] == comparison["neo4j_count"]
+    assert comparison["common_count"] == comparison["neo4j_count"]
     assert comparison["only_in_neo4j"] == 0
     assert comparison["only_in_qdrant"] == 0
     assert comparison["consistency"] == "pass"

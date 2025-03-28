@@ -1,10 +1,10 @@
 """Tests for query engine functionality."""
 
 import pytest
-from neo4j import GraphDatabase
 
 from hybridflow.retrieval.query import QueryEngine
 from hybridflow.storage.qdrant_client import QdrantStorage
+from hybridflow.storage.neo4j_client import Neo4jStorage
 
 
 @pytest.fixture
@@ -15,21 +15,21 @@ def qdrant_storage():
 
 
 @pytest.fixture
-def neo4j_driver():
-    """Create Neo4j driver."""
-    driver = GraphDatabase.driver(
-        "bolt://localhost:7687", auth=("neo4j", "password")
+def neo4j_storage():
+    """Create Neo4j storage."""
+    storage = Neo4jStorage(
+        uri="bolt://localhost:7687", user="neo4j", password="password"
     )
-    yield driver
-    driver.close()
+    yield storage
+    storage.close()
 
 
 @pytest.fixture
-def query_engine(qdrant_storage, neo4j_driver):
+def query_engine(qdrant_storage, neo4j_storage):
     """Create query engine."""
     engine = QueryEngine(
         qdrant_client=qdrant_storage.client,
-        neo4j_driver=neo4j_driver,
+        neo4j_driver=neo4j_storage.driver,
         embedding_model="sentence-transformers/all-MiniLM-L6-v2",
         collection_name=qdrant_storage.read_collection,
     )

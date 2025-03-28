@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for metadata storage."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column,
@@ -28,7 +28,7 @@ class ChapterMetadata(Base):
     title = Column(String(500), nullable=False)
     content_hash = Column(String(64), nullable=False)
     version = Column(Integer, default=1)
-    ingestion_timestamp = Column(DateTime, default=datetime.utcnow)
+    ingestion_timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     source_file_path = Column(String(500))
     chunk_count = Column(Integer, default=0)
     quality_score = Column(Float, nullable=True)
@@ -45,7 +45,7 @@ class IngestionLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     chapter_id = Column(Integer, ForeignKey("chapter_metadata.id"))
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     status = Column(String(20), nullable=False)
     parsing_strategy = Column(String(50))
     error_message = Column(Text)
