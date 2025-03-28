@@ -329,9 +329,10 @@ class QueryEngine:
         Returns:
             Dictionary with first paragraph and section metadata, or None if section not found
         """
+        # Query supports both versioned and non-versioned section IDs
         query = """
         MATCH (section)
-        WHERE section.id = $section_id
+        WHERE (section.id = $section_id OR section.original_id = $section_id)
           AND (section:Section OR section:Subsection OR section:Subsubsection)
 
         // Get first paragraph (ordered by paragraph number)

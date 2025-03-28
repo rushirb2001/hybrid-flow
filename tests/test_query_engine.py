@@ -4,9 +4,9 @@ import os
 import pytest
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
-from qdrant_client import QdrantClient
 
 from hybridflow.retrieval.query import QueryEngine
+from hybridflow.storage.qdrant_client import QdrantStorage
 
 # Load environment variables
 load_dotenv()
@@ -15,7 +15,7 @@ load_dotenv()
 @pytest.fixture
 def query_engine():
     """Create QueryEngine instance for testing."""
-    qdrant_client = QdrantClient(
+    qdrant_storage = QdrantStorage(
         host=os.getenv("QDRANT_HOST", "localhost"),
         port=int(os.getenv("QDRANT_PORT", "6333")),
     )
@@ -25,13 +25,17 @@ def query_engine():
         auth=(os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", "password")),
     )
 
-    engine = QueryEngine(qdrant_client=qdrant_client, neo4j_driver=neo4j_driver)
+    engine = QueryEngine(
+        qdrant_client=qdrant_storage.client,
+        neo4j_driver=neo4j_driver,
+        collection_name=qdrant_storage.read_collection,
+    )
 
     yield engine
 
     # Cleanup
     engine.close()
-    qdrant_client.close()
+    qdrant_storage.client.close()
 
 
 class TestGetSurroundingParagraphs:
@@ -50,8 +54,8 @@ class TestGetSurroundingParagraphs:
         assert "after" in result
         assert "metadata" in result
 
-        # Verify current paragraph
-        assert result["current"]["chunk_id"] == "bailey:ch01:1.1.2"
+        # Verify current paragraph (supports versioned IDs)
+        assert result["current"]["chunk_id"].startswith("bailey:ch01:1.1.2")
         assert result["current"]["position"] == "current"
         assert "number" in result["current"]
         assert "text" in result["current"]
@@ -118,8 +122,8 @@ class TestGetSurroundingParagraphs:
         assert isinstance(result["hierarchy"], str)
         assert len(result["hierarchy"]) > 0
 
-        # Verify chapter ID matches expected format
-        assert result["chapter_id"] == "bailey:ch60"
+        # Verify chapter ID matches expected format (supports versioned IDs)
+        assert result["chapter_id"].startswith("bailey:ch60")
 
     def test_all_siblings_included(self, query_engine):
         """Test that all siblings in parent section are included."""
@@ -573,9 +577,9 @@ class TestGetSiblingParagraphs:
         current_count = sum(1 for s in result["siblings"] if s["is_current"])
         assert current_count == 1
 
-        # The current sibling should match the queried chunk_id
+        # The current sibling should match the queried chunk_id (supports versioned IDs)
         current_sibling = next(s for s in result["siblings"] if s["is_current"])
-        assert current_sibling["chunk_id"] == "bailey:ch01:1.1.2"
+        assert current_sibling["chunk_id"].startswith("bailey:ch01:1.1.2")
 
     def test_siblings_ordering(self, query_engine):
         """Test that siblings are ordered by paragraph number."""

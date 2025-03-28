@@ -2,16 +2,16 @@
 
 import pytest
 from neo4j import GraphDatabase
-from qdrant_client import QdrantClient
 
 from hybridflow.retrieval.query import QueryEngine
+from hybridflow.storage.qdrant_client import QdrantStorage
 
 
 @pytest.fixture
-def qdrant_client():
-    """Create Qdrant client."""
-    client = QdrantClient(host="localhost", port=6333)
-    yield client
+def qdrant_storage():
+    """Create Qdrant storage with alias resolution."""
+    storage = QdrantStorage(host="localhost", port=6333)
+    yield storage
 
 
 @pytest.fixture
@@ -25,12 +25,13 @@ def neo4j_driver():
 
 
 @pytest.fixture
-def query_engine(qdrant_client, neo4j_driver):
+def query_engine(qdrant_storage, neo4j_driver):
     """Create query engine."""
     engine = QueryEngine(
-        qdrant_client=qdrant_client,
+        qdrant_client=qdrant_storage.client,
         neo4j_driver=neo4j_driver,
         embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        collection_name=qdrant_storage.read_collection,
     )
     yield engine
     engine.close()
