@@ -7,10 +7,10 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
 
 from hybridflow.models import ExpansionConfig
 from hybridflow.retrieval.query import QueryEngine
+from hybridflow.storage.neo4j_client import Neo4jStorage
 from hybridflow.storage.qdrant_client import QdrantStorage
 
 load_dotenv()
@@ -36,18 +36,15 @@ def cmd_search(args: argparse.Namespace) -> int:
             port=int(os.getenv("QDRANT_PORT", "6333")),
         )
 
-        neo4j_driver = GraphDatabase.driver(
-            os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-            auth=(
-                os.getenv("NEO4J_USER", "neo4j"),
-                os.getenv("NEO4J_PASSWORD", "password"),
-            ),
+        neo4j_storage = Neo4jStorage(
+            uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            user=os.getenv("NEO4J_USER", "neo4j"),
+            password=os.getenv("NEO4J_PASSWORD", "password"),
         )
 
         engine = QueryEngine(
-            qdrant_client=qdrant_storage.client,
-            neo4j_driver=neo4j_driver,
-            collection_name=qdrant_storage.read_collection,
+            qdrant_storage=qdrant_storage,
+            neo4j_storage=neo4j_storage,
         )
 
         # TASK 5.3: Determine expansion config based on CLI flags
@@ -106,8 +103,8 @@ def cmd_search(args: argparse.Namespace) -> int:
             # Show expansion metadata if present
             if "expanded_context" in result:
                 meta = result["expanded_context"].get("expansion_metadata", {})
-                before = meta.get("before_count", 0)
-                after = meta.get("after_count", 0)
+                before = meta.get("returned_before", 0)
+                after = meta.get("returned_after", 0)
                 print(f"  Expansion: {before} before, {after} after")
 
             if "section_context" in result:
@@ -149,23 +146,20 @@ def cmd_get_hierarchy(args: argparse.Namespace) -> int:
     )
 
     try:
-        neo4j_driver = GraphDatabase.driver(
-            os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-            auth=(
-                os.getenv("NEO4J_USER", "neo4j"),
-                os.getenv("NEO4J_PASSWORD", "password"),
-            ),
-        )
-
         qdrant_storage = QdrantStorage(
             host=os.getenv("QDRANT_HOST", "localhost"),
             port=int(os.getenv("QDRANT_PORT", "6333")),
         )
 
+        neo4j_storage = Neo4jStorage(
+            uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            user=os.getenv("NEO4J_USER", "neo4j"),
+            password=os.getenv("NEO4J_PASSWORD", "password"),
+        )
+
         engine = QueryEngine(
-            qdrant_client=qdrant_storage.client,
-            neo4j_driver=neo4j_driver,
-            collection_name=qdrant_storage.read_collection,
+            qdrant_storage=qdrant_storage,
+            neo4j_storage=neo4j_storage,
         )
 
         structure = engine.get_chapter_structure(args.chapter_id)

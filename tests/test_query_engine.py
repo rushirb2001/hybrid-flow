@@ -27,9 +27,8 @@ def query_engine():
     )
 
     engine = QueryEngine(
-        qdrant_client=qdrant_storage.client,
-        neo4j_driver=neo4j_storage.driver,
-        collection_name=qdrant_storage.read_collection,
+        qdrant_storage=qdrant_storage,
+        neo4j_storage=neo4j_storage,
     )
 
     yield engine

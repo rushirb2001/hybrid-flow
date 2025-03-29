@@ -4,11 +4,11 @@ import json
 import logging
 from typing import Dict, List, Optional, Union
 
-from neo4j import GraphDatabase
-from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
 from hybridflow.models import ExpansionConfig
+from hybridflow.storage.neo4j_client import Neo4jStorage
+from hybridflow.storage.qdrant_client import QdrantStorage
 
 logger = logging.getLogger(__name__)
 
@@ -18,22 +18,19 @@ class QueryEngine:
 
     def __init__(
         self,
-        qdrant_client: QdrantClient,
-        neo4j_driver,
+        qdrant_storage: QdrantStorage,
+        neo4j_storage: Neo4jStorage,
         embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
-        collection_name: str = "textbook_chunks",
     ):
         """Initialize query engine.
 
         Args:
-            qdrant_client: Qdrant client for vector search
-            neo4j_driver: Neo4j driver for graph traversal
+            qdrant_storage: QdrantStorage instance for vector search
+            neo4j_storage: Neo4jStorage instance for graph traversal
             embedding_model: Embedding model name
-            collection_name: Qdrant collection name
         """
-        self.qdrant = qdrant_client
-        self.neo4j = neo4j_driver
-        self.collection_name = collection_name
+        self.qdrant_storage = qdrant_storage
+        self.neo4j_storage = neo4j_storage
         self.encoder = SentenceTransformer(embedding_model)
 
     def semantic_search(
@@ -51,8 +48,8 @@ class QueryEngine:
         """
         query_vector = self.encoder.encode(query_text).tolist()
 
-        search_results = self.qdrant.query_points(
-            collection_name=self.collection_name,
+        search_results = self.qdrant_storage.client.query_points(
+            collection_name=self.qdrant_storage.read_collection,
             query=query_vector,
             limit=limit,
             score_threshold=score_threshold,
@@ -102,7 +99,7 @@ class QueryEngine:
                sss.title as subsubsection_title
         """
 
-        with self.neo4j.session() as session:
+        with self.neo4j_storage.driver.session() as session:
             result = session.run(query, chunk_id=chunk_id)
             record = result.single()
 
@@ -231,7 +228,7 @@ class QueryEngine:
                 RETURN parent.id as parent_id, parent.title as parent_title
                 """
 
-                with self.neo4j.session() as session:
+                with self.neo4j_storage.driver.session() as session:
                     neo4j_result = session.run(query, chunk_id=chunk_id)
                     record = neo4j_result.single()
 
@@ -305,7 +302,7 @@ class QueryEngine:
                }) as sections
         """
 
-        with self.neo4j.session() as session:
+        with self.neo4j_storage.driver.session() as session:
             result = session.run(query, chapter_id=chapter_id)
             record = result.single()
 
@@ -360,7 +357,7 @@ class QueryEngine:
                sss.title as subsubsection_title
         """
 
-        with self.neo4j.session() as session:
+        with self.neo4j_storage.driver.session() as session:
             result = session.run(query, section_id=section_id)
             record = result.single()
 
@@ -498,7 +495,7 @@ class QueryEngine:
                    }) as siblings
             """
 
-        with self.neo4j.session() as session:
+        with self.neo4j_storage.driver.session() as session:
             result = session.run(query, chunk_id=chunk_id)
             record = result.single()
 
@@ -543,21 +540,27 @@ class QueryEngine:
             all metadata and hierarchy information
         """
         # Query supports both versioned and non-versioned data
+        # Uses explicit OPTIONAL MATCH for each step to avoid issues with
+        # variable-length path matching in Neo4j
         query = """
         MATCH (current:Paragraph)
         WHERE current.chunk_id = $chunk_id OR current.original_chunk_id = $chunk_id
 
-        // Get paragraphs before (using PREV relationships)
-        OPTIONAL MATCH path_before = (current)-[:PREV*1..]->(before:Paragraph)
-        WITH current, before, path_before
-        ORDER BY length(path_before) ASC
-        WITH current, collect(before)[0..$before_count] as before_paragraphs
+        // Get paragraphs before by following PREV relationships
+        OPTIONAL MATCH (current)-[:PREV]->(b1:Paragraph)
+        OPTIONAL MATCH (b1)-[:PREV]->(b2:Paragraph)
+        WITH current,
+             CASE WHEN b2 IS NOT NULL THEN [b2, b1]
+                  WHEN b1 IS NOT NULL THEN [b1]
+                  ELSE [] END as before_paragraphs
 
-        // Get paragraphs after (using NEXT relationships)
-        OPTIONAL MATCH path_after = (current)-[:NEXT*1..]->(after:Paragraph)
-        WITH current, before_paragraphs, after, path_after
-        ORDER BY length(path_after) ASC
-        WITH current, before_paragraphs, collect(after)[0..$after_count] as after_paragraphs
+        // Get paragraphs after by following NEXT relationships
+        OPTIONAL MATCH (current)-[:NEXT]->(a1:Paragraph)
+        OPTIONAL MATCH (a1)-[:NEXT]->(a2:Paragraph)
+        WITH current, before_paragraphs,
+             CASE WHEN a2 IS NOT NULL THEN [a1, a2]
+                  WHEN a1 IS NOT NULL THEN [a1]
+                  ELSE [] END as after_paragraphs
 
         // Get hierarchy context for current paragraph
         OPTIONAL MATCH (c:Chapter)-[:HAS_SECTION]->(s:Section)
@@ -609,7 +612,7 @@ class QueryEngine:
                all_siblings
         """
 
-        with self.neo4j.session() as session:
+        with self.neo4j_storage.driver.session() as session:
             result = session.run(
                 query, chunk_id=chunk_id, before_count=before_count, after_count=after_count
             )
@@ -635,6 +638,16 @@ class QueryEngine:
             if all_siblings:
                 all_siblings = sorted(all_siblings, key=lambda x: x["number"])
 
+            # Get before paragraphs and slice to requested count
+            before_list = [
+                {**p, "position": "before"} for p in reversed(record["before"]) if p
+            ]
+            before_list = before_list[:before_count] if before_count > 0 else []
+
+            # Get after paragraphs and slice to requested count
+            after_list = [{**p, "position": "after"} for p in record["after"] if p]
+            after_list = after_list[:after_count] if after_count > 0 else []
+
             return {
                 "current": {
                     "chunk_id": record["current_chunk_id"],
@@ -643,10 +656,8 @@ class QueryEngine:
                     "page": record["current_page"],
                     "position": "current",
                 },
-                "before": [
-                    {**p, "position": "before"} for p in reversed(record["before"]) if p
-                ],
-                "after": [{**p, "position": "after"} for p in record["after"] if p],
+                "before": before_list,
+                "after": after_list,
                 "hierarchy": " > ".join(hierarchy_parts),
                 "chapter_id": record["chapter_id"],
                 "parent_section": record["parent_title"],
@@ -654,8 +665,8 @@ class QueryEngine:
                 "metadata": {
                     "requested_before": before_count,
                     "requested_after": after_count,
-                    "returned_before": len([p for p in record["before"] if p]),
-                    "returned_after": len([p for p in record["after"] if p]),
+                    "returned_before": len(before_list),
+                    "returned_after": len(after_list),
                 },
             }
 
@@ -696,7 +707,7 @@ class QueryEngine:
         RETURN p.cross_references as cross_references
         """
 
-        with self.neo4j.session() as session:
+        with self.neo4j_storage.driver.session() as session:
             result = session.run(query, chunk_id=chunk_id)
             record = result.single()
 
@@ -832,17 +843,33 @@ class QueryEngine:
         # Add section number from chunk_id if available
         chunk_id = result.get("chunk_id", "")
         if chunk_id and ":" in chunk_id:
-            # Extract paragraph number which contains section info
-            # Format: bailey:ch60:2.4.1 -> section 2.4, paragraph 1
+            # Extract paragraph number which encodes the hierarchy
+            # Hierarchy format: section.subsection.subsubsection.paragraph
+            # Examples:
+            #   "1.3" = Section 1, Subsection 3 → show "Section 1.3"
+            #   "1.3.8" = Section 1, Subsection 3, Para 8 → show "Section 1.3"
+            #   "2.4.4.2" = Section 2, Subsec 4, Subsub 4, Para 2 → show "Section 2.4.4"
             id_parts = chunk_id.split(":")
             if len(id_parts) >= 3:
                 paragraph_num = id_parts[2]
-                # Get section number (first two parts of paragraph number)
+                # Handle versioned chunk_ids by stripping version suffix
+                if "::" in paragraph_num:
+                    paragraph_num = paragraph_num.split("::")[0]
                 if "." in paragraph_num:
                     section_parts = paragraph_num.split(".")
-                    if len(section_parts) >= 2:
+                    num_parts = len(section_parts)
+                    if num_parts == 2:
+                        # Subsection level: show both parts (e.g., "1.3")
                         section_num = f"{section_parts[0]}.{section_parts[1]}"
-                        parts.append(f"Section {section_num}")
+                    elif num_parts >= 3:
+                        # Deeper hierarchy: show all but last (paragraph) number
+                        section_num = ".".join(section_parts[:-1])
+                    else:
+                        section_num = section_parts[0]
+                    parts.append(f"Section {section_num}")
+                else:
+                    # Single number at section level
+                    parts.append(f"Section {paragraph_num}")
 
         # Add page number
         page = result.get("page")
@@ -853,5 +880,5 @@ class QueryEngine:
 
     def close(self):
         """Close connections."""
-        if self.neo4j:
-            self.neo4j.close()
+        if self.neo4j_storage:
+            self.neo4j_storage.close()

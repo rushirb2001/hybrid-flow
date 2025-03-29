@@ -28,10 +28,9 @@ def neo4j_storage():
 def query_engine(qdrant_storage, neo4j_storage):
     """Create query engine."""
     engine = QueryEngine(
-        qdrant_client=qdrant_storage.client,
-        neo4j_driver=neo4j_storage.driver,
+        qdrant_storage=qdrant_storage,
+        neo4j_storage=neo4j_storage,
         embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-        collection_name=qdrant_storage.read_collection,
     )
     yield engine
     engine.close()
