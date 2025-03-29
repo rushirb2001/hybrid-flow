@@ -737,6 +737,46 @@ class QdrantStorage:
             else "issues_found",
         }
 
+    def count_by_version(self, version_id: str) -> int:
+        """Count points in a collection that have a specific version_id in their payload.
+
+        This is used for validation during transactional ingestion to count only
+        the newly ingested points (which have the staging version_id in their payload),
+        ignoring copied production points (which have 'production' as version_id).
+
+        Args:
+            version_id: The version ID to filter by (e.g., 'staging20251227_140000')
+
+        Returns:
+            Count of points matching the version_id
+
+        Example:
+            >>> storage = QdrantStorage(host='localhost', port=6333)
+            >>> count = storage.count_by_version('staging20251227_140000')
+            >>> print(f"Found {count} points for this version")
+        """
+        # Determine collection name for this version
+        collection_name = self._get_versioned_collection_name(version_id)
+
+        try:
+            # Use count with filter on version_id payload field
+            count_result = self.client.count(
+                collection_name=collection_name,
+                count_filter=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="version_id",
+                            match=qmodels.MatchValue(value=version_id),
+                        )
+                    ]
+                ),
+                exact=True,
+            )
+            return count_result.count
+        except Exception:
+            # Collection doesn't exist or query failed
+            return 0
+
     def get_collection_stats(self, version_id: Optional[str] = None) -> Dict[str, Any]:
         """Get comprehensive statistical analysis of a collection.
 

@@ -328,6 +328,7 @@ class IngestionPipeline:
                     "chapter_title": chapter.title,
                     "hierarchy_path": " > ".join(hierarchy_path),
                     "page": paragraph.page,
+                    "version_id": version_id if version_id else "production",
                 }
 
                 # Determine parent ID based on paragraph number structure
@@ -441,7 +442,9 @@ class IngestionPipeline:
                             })
 
                 # Collect for Qdrant batch upsert
-                qdrant_chunks.append((chunk_id, paragraph.text, metadata, embedding))
+                # Use versioned chunk_id to avoid UUID collisions when same content is staged
+                versioned_chunk_id = f"{chunk_id}::{version_id}" if version_id else chunk_id
+                qdrant_chunks.append((versioned_chunk_id, paragraph.text, metadata, embedding))
 
             # Execute batch Neo4j operations
             # 1. Batch upsert hierarchy (textbook, chapter, sections, subsections, subsubsections)
@@ -886,25 +889,20 @@ class IngestionPipeline:
         qdrant_count = report["checks"]["qdrant_point_count"]
         neo4j_count = report["checks"]["neo4j_paragraph_count"]
 
-        # For staging versions, account for copied production data in Qdrant
-        # Production data is copied to Qdrant staging but Neo4j only has new versioned data
+        # For staging versions, count only points with matching version_id in payload
+        # This handles copy-on-write where production points are copied but keep "production" version_id
         if version_id.startswith("staging"):
-            # Get production Qdrant count (main collection without version suffix)
-            production_validation = self.qdrant_storage.validate_collection(None)
-            production_count = production_validation.get("point_count", 0)
+            # Count points with this specific version_id in their payload
+            qdrant_versioned_count = self._count_qdrant_by_version(version_id)
+            report["checks"]["qdrant_versioned_count"] = qdrant_versioned_count
 
-            # Calculate new data count: staging total - production copied
-            qdrant_new_count = qdrant_count - production_count
-            report["checks"]["qdrant_production_count"] = production_count
-            report["checks"]["qdrant_new_count"] = qdrant_new_count
-
-            # Compare NEW data counts
-            report["checks"]["counts_match"] = qdrant_new_count == neo4j_count
+            # Compare versioned data counts
+            report["checks"]["counts_match"] = qdrant_versioned_count == neo4j_count
 
             if not report["checks"]["counts_match"]:
                 report["errors"].append(
-                    f"Count mismatch: Qdrant new={qdrant_new_count}, Neo4j={neo4j_count} "
-                    f"(Qdrant staging={qdrant_count}, production={production_count})"
+                    f"Count mismatch: Qdrant versioned={qdrant_versioned_count}, Neo4j={neo4j_count} "
+                    f"(Qdrant staging total={qdrant_count})"
                 )
         else:
             # Non-staging version: direct comparison
@@ -942,6 +940,17 @@ class IngestionPipeline:
         )
 
         return report
+
+    def _count_qdrant_by_version(self, version_id: str) -> int:
+        """Count Qdrant points that have a specific version_id in their payload.
+
+        Args:
+            version_id: The version ID to filter by
+
+        Returns:
+            Count of points matching the version_id
+        """
+        return self.qdrant_storage.count_by_version(version_id)
 
     def _commit_version(self, version_id: str) -> None:
         """Commit a validated version to production.
@@ -1068,13 +1077,16 @@ class IngestionPipeline:
 
         return deleted
 
-    def _rollback_version(self, version_id: str, error: str = None) -> None:
+    def _rollback_version(self, version_id: str, error: Any = None) -> None:
         """Rollback a failed version and cleanup.
 
         Args:
             version_id: The version ID to rollback
-            error: Error message or details
+            error: Error message or details (can be string or list)
         """
+        # Convert error to string if it's a list or other type
+        error_str = str(error) if error is not None else None
+
         # Update status to rolling_back
         self.metadata_db.update_version_status(version_id, "rolling_back")
 
@@ -1086,10 +1098,10 @@ class IngestionPipeline:
             "version",
             version_id,
             "pending",
-            error_message=error,
+            error_message=error_str,
         )
 
-        self.logger.warning(f"Rolling back version {version_id}: {error}")
+        self.logger.warning(f"Rolling back version {version_id}: {error_str}")
 
         # Clean up SQLite staging
         try:

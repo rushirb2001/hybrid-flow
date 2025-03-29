@@ -33,6 +33,7 @@ def test_chapter_file(tmp_path):
     Structure matches actual data format with bounds as array [x1, y1, x2, y2].
     """
     data = {
+        "textbook_id": "bailey",
         "chapter_number": "99",
         "title": "Versioning Test Chapter",
         "sections": [
@@ -79,6 +80,7 @@ def test_directory(tmp_path):
 
     for chapter_num in range(95, 100):
         data = {
+            "textbook_id": "bailey",
             "chapter_number": str(chapter_num),
             "title": f"Test Chapter {chapter_num}",
             "sections": [
@@ -124,7 +126,6 @@ def test_versioned_id_format(pipeline):
     assert unversioned == base_id
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_transactional_ingestion_creates_versioned_nodes(pipeline, test_chapter_file):
     """Test that transactional ingestion creates nodes with versioned IDs."""
     result = pipeline.ingest_chapter_transactional(test_chapter_file, force=True)
@@ -149,7 +150,6 @@ def test_transactional_ingestion_creates_versioned_nodes(pipeline, test_chapter_
     assert record["title"] == "Versioning Test Chapter"
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_multiple_versions_can_coexist(pipeline, test_chapter_file):
     """Test that multiple versions of same chapter can exist in Neo4j."""
     # Ingest first version
@@ -190,7 +190,6 @@ def test_multiple_versions_can_coexist(pipeline, test_chapter_file):
         assert record_v2["title"] == "Versioning Test Chapter - Updated"
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_snapshot_deletion_by_version_id(pipeline, test_chapter_file):
     """Test that delete_snapshot correctly removes versioned nodes."""
     # Ingest a version
@@ -225,7 +224,6 @@ def test_snapshot_deletion_by_version_id(pipeline, test_chapter_file):
 # ============================================================================
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_incremental_validation_runs_at_checkpoints(pipeline, test_directory):
     """Test that validation runs at specified checkpoints."""
     # Ingest with validate_every=2 (should validate after every 2 chapters)
@@ -238,7 +236,6 @@ def test_incremental_validation_runs_at_checkpoints(pipeline, test_directory):
     assert result["success"] == 5
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_incremental_validation_uses_versioned_filter(pipeline, test_directory):
     """Test that incremental validation correctly filters by version_id."""
     result = pipeline.ingest_directory_transactional(
@@ -335,7 +332,6 @@ def test_alias_backup_performance(pipeline, test_chapter_file):
 # ============================================================================
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_check_version_in_use(pipeline, test_chapter_file):
     """Test the _check_version_in_use helper method."""
     # Create a version
@@ -355,7 +351,6 @@ def test_check_version_in_use(pipeline, test_chapter_file):
     assert in_use is False
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_version_rotation_preserves_active_versions(pipeline, test_chapter_file):
     """Test that rotation doesn't delete versions marked as in-use."""
     # Create multiple versions
@@ -379,7 +374,6 @@ def test_version_rotation_preserves_active_versions(pipeline, test_chapter_file)
 # ============================================================================
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_full_transactional_workflow_commit(pipeline, test_chapter_file):
     """Test complete transaction workflow with successful commit."""
     result = pipeline.ingest_chapter_transactional(test_chapter_file, force=True)
@@ -401,7 +395,6 @@ def test_full_transactional_workflow_commit(pipeline, test_chapter_file):
     assert chapter_metadata.title == "Versioning Test Chapter"
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_transactional_ingestion_validates_counts(pipeline, test_chapter_file):
     """Test that transactional ingestion validates Neo4j and Qdrant counts match."""
     result = pipeline.ingest_chapter_transactional(test_chapter_file, force=True)
@@ -416,7 +409,6 @@ def test_transactional_ingestion_validates_counts(pipeline, test_chapter_file):
     assert validation["node_counts"]["Paragraph"] > 0
 
 
-@pytest.mark.skip(reason="Transactional ingestion requires redesign for mixed versioned/unversioned data")
 def test_transactional_ingestion_creates_versioned_metadata(pipeline, test_chapter_file):
     """Test that version metadata is properly tracked."""
     result = pipeline.ingest_chapter_transactional(

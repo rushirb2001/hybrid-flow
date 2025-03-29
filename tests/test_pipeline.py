@@ -32,6 +32,7 @@ def bailey_chapter_file(tmp_path):
     Structure matches actual data format with bounds as array [x1, y1, x2, y2].
     """
     data = {
+        "textbook_id": "bailey",
         "chapter_number": "99",
         "title": "Test Chapter for Pipeline",
         "key_points": [],
@@ -118,7 +119,7 @@ def test_ingest_chapter_creates_neo4j_hierarchy(pipeline, bailey_chapter_file):
     """Test that ingesting creates proper Neo4j hierarchy."""
     pipeline.ingest_chapter(bailey_chapter_file, force=True)
 
-    # Query Neo4j for complete hierarchy
+    # Query Neo4j for complete hierarchy - use test chapter 99, not production chapter
     query = """
     MATCH (c:Chapter {id: $chapter_id})
     OPTIONAL MATCH (c)-[:HAS_SECTION]->(s:Section)
@@ -131,14 +132,14 @@ def test_ingest_chapter_creates_neo4j_hierarchy(pipeline, bailey_chapter_file):
     """
 
     with pipeline.neo4j_storage.driver.session() as session:
-        result = session.run(query, chapter_id="bailey:ch2")
+        result = session.run(query, chapter_id="bailey:ch99")
         record = result.single()
 
     assert record is not None
-    assert record["chapter_title"] == "Shock and blood transfusion"
-    assert record["section_count"] >= 1
-    assert record["subsection_count"] >= 1
-    assert record["subsubsection_count"] >= 1
+    assert record["chapter_title"] == "Test Chapter for Pipeline"
+    assert record["section_count"] == 2  # Introduction and Main Content
+    assert record["subsection_count"] == 1  # Subsection One under Main Content
+    assert record["subsubsection_count"] == 1  # Subsubsection under Subsection One
 
 
 def test_ingest_chapter_creates_qdrant_vectors(pipeline, bailey_chapter_file):
@@ -330,9 +331,10 @@ def test_ingest_neo4j_paragraphs_match_qdrant_count(pipeline, bailey_chapter_fil
         """
         version_suffix = f"::{version_id}"
     else:
+        # For unversioned ingestion, exclude paragraphs with version suffix (::)
         query = """
         MATCH (p:Paragraph)
-        WHERE p.chunk_id STARTS WITH 'bailey:ch99:'
+        WHERE p.chunk_id STARTS WITH 'bailey:ch99:' AND NOT p.chunk_id CONTAINS '::'
         RETURN count(p) as paragraph_count
         """
         version_suffix = None
