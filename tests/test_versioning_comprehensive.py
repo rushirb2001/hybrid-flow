@@ -19,7 +19,7 @@ def pipeline(tmp_path):
         neo4j_user="neo4j",
         neo4j_password="password",
         metadata_db_path=str(tmp_path / "test_versioning_metadata.db"),
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT",
     )
     yield pipeline_instance
     pipeline_instance.close()
@@ -268,7 +268,7 @@ def test_create_alias_backup(pipeline):
     # Verify alias exists by searching through it
     from hybridflow.parsing.embedder import EmbeddingGenerator
 
-    embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embedder = EmbeddingGenerator(model_name="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT")
     query_embedding = embedder.generate_embedding("test")
 
     # Should be able to query through alias
@@ -292,7 +292,7 @@ def test_delete_alias(pipeline):
     # Verify alias no longer exists by attempting to query it
     from hybridflow.parsing.embedder import EmbeddingGenerator
 
-    embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embedder = EmbeddingGenerator(model_name="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT")
     query_embedding = embedder.generate_embedding("test")
 
     with pytest.raises(Exception):

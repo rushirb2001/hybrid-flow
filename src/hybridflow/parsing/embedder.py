@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 class EmbeddingGenerator:
     """Generates vector embeddings for text chunks using sentence transformers."""
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
+    def __init__(self, model_name: str = "pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT") -> None:
         """Initialize the embedding generator.
 
         Args:
@@ -17,7 +17,7 @@ class EmbeddingGenerator:
         """
         self.model = SentenceTransformer(model_name, device="mps")
         self.model_name = model_name
-        self.vector_size = 384
+        self.vector_size = self.model.get_sentence_embedding_dimension()
 
     def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding vector for a single text.

@@ -28,7 +28,8 @@ class QdrantStorage:
         host: str = "localhost",
         port: int = 6333,
         collection_name: str = "textbook_chunks",
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT",
+        vector_size: int = 768,
         version_suffix: Optional[str] = None,
     ):
         """Initialize the Qdrant client.
@@ -37,7 +38,8 @@ class QdrantStorage:
             host: Qdrant server host (default: localhost)
             port: Qdrant server port (default: 6333)
             collection_name: Base name of the vector collection (default: textbook_chunks)
-            embedding_model: Embedding model identifier (default: sentence-transformers/all-MiniLM-L6-v2)
+            embedding_model: Embedding model identifier (default: S-PubMedBert-MS-MARCO-SCIFACT)
+            vector_size: Dimensionality of embedding vectors (default: 768 for PubMedBert)
             version_suffix: Optional version suffix to create versioned collection instances.
                            If provided, collection_name becomes '{collection_name}_{version_suffix}'.
                            This allows multiple versions of the same collection to coexist.
@@ -45,6 +47,7 @@ class QdrantStorage:
         """
         self.client = qdrant_client.QdrantClient(host=host, port=port)
         self.version_suffix = version_suffix
+        self.vector_size = vector_size
         # Store the base collection name for versioning operations
         self.base_collection_name = collection_name
         # For backward compatibility, collection_name includes version suffix if provided
@@ -75,14 +78,13 @@ class QdrantStorage:
     def create_collection(self) -> None:
         """Create the collection if it doesn't exist.
 
-        Uses 384-dimensional vectors (sentence-transformers/all-MiniLM-L6-v2 default)
-        with cosine distance metric for semantic similarity.
+        Uses configured vector_size with cosine distance metric for semantic similarity.
         """
         if not self.client.collection_exists(self.collection_name):
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=qmodels.VectorParams(
-                    size=384, distance=qmodels.Distance.COSINE
+                    size=self.vector_size, distance=qmodels.Distance.COSINE
                 ),
             )
 
@@ -98,7 +100,7 @@ class QdrantStorage:
                 - chunk_id: Unique identifier for the chunk
                 - text: Text content of the chunk
                 - metadata: Additional metadata (e.g., chapter_id, page, etc.)
-                - embedding: 384-dimensional vector embedding
+                - embedding: Vector embedding (dimensionality matches configured vector_size)
             version_id: Optional version identifier to upsert into a specific versioned collection.
                        If None, upserts to the current instance's collection.
                        If provided, creates the versioned collection if it doesn't exist.
@@ -128,7 +130,7 @@ class QdrantStorage:
                 self.client.create_collection(
                     collection_name=target_collection,
                     vectors_config=qmodels.VectorParams(
-                        size=384, distance=qmodels.Distance.COSINE
+                        size=self.vector_size, distance=qmodels.Distance.COSINE
                     ),
                 )
 
@@ -681,7 +683,7 @@ class QdrantStorage:
             return {
                 "collection_name": collection_name,
                 "point_count": 0,
-                "vector_size": 384,
+                "vector_size": self.vector_size,
                 "distance_metric": "COSINE",
                 "null_vectors": 0,
                 "metadata_completeness": {},

@@ -456,7 +456,7 @@ class VersionManager:
             try:
                 from hybridflow.parsing.embedder import EmbeddingGenerator
 
-                embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+                embedder = EmbeddingGenerator(model_name="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT")
                 query_embedding = embedder.generate_embedding("test")
                 self.qdrant.client.query_points(
                     collection_name=baseline_alias, query=query_embedding, limit=1

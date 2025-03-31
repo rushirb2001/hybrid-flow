@@ -30,7 +30,7 @@ def query_engine(qdrant_storage, neo4j_storage):
     engine = QueryEngine(
         qdrant_storage=qdrant_storage,
         neo4j_storage=neo4j_storage,
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT",
     )
     yield engine
     engine.close()

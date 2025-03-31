@@ -170,6 +170,7 @@ class IngestionPipeline:
         metadata_db_path: str,
         embedding_model: str,
         qdrant_collection_name: str = "textbook_chunks",
+        vector_size: int = 768,
     ) -> None:
         """Initialize the ingestion pipeline.
 
@@ -182,10 +183,12 @@ class IngestionPipeline:
             metadata_db_path: Path to SQLite metadata database
             embedding_model: Sentence transformer model name
             qdrant_collection_name: Qdrant collection name (default: textbook_chunks)
+            vector_size: Dimensionality of embedding vectors (default: 768)
         """
         # Initialize storage clients
         self.qdrant_storage = QdrantStorage(
-            host=qdrant_host, port=qdrant_port, collection_name=qdrant_collection_name
+            host=qdrant_host, port=qdrant_port, collection_name=qdrant_collection_name,
+            vector_size=vector_size
         )
         self.neo4j_storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
         self.metadata_db = MetadataDatabase(database_path=metadata_db_path)

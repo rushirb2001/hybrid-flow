@@ -534,6 +534,83 @@ class Neo4jStorage:
                 }
             return {}
 
+    def get_paragraph_context(self, chunk_id: str) -> Optional[Dict]:
+        """Retrieve paragraph with its full hierarchy context.
+
+        Args:
+            chunk_id: Paragraph chunk identifier (versioned or non-versioned)
+
+        Returns:
+            Dictionary with paragraph data and hierarchy path, or None if not found
+        """
+        query = """
+        MATCH (p:Paragraph)
+        WHERE p.chunk_id = $chunk_id OR p.original_chunk_id = $chunk_id
+
+        // Find the direct parent of the paragraph
+        OPTIONAL MATCH (parent)-[:HAS_PARAGRAPH]->(p)
+        WHERE parent:Section OR parent:Subsection OR parent:Subsubsection
+
+        // Get chapter through section
+        OPTIONAL MATCH (c:Chapter)-[:HAS_SECTION]->(s:Section)
+        WHERE s = parent
+           OR (s)-[:HAS_SUBSECTION]->(parent)
+           OR (s)-[:HAS_SUBSECTION]->()-[:HAS_SUBSUBSECTION]->(parent)
+
+        // Get subsection if parent is subsection or subsubsection
+        OPTIONAL MATCH (s)-[:HAS_SUBSECTION]->(ss:Subsection)
+        WHERE ss = parent OR (ss)-[:HAS_SUBSUBSECTION]->(parent)
+
+        // Get subsubsection if parent is subsubsection
+        OPTIONAL MATCH (ss)-[:HAS_SUBSUBSECTION]->(sss:Subsubsection)
+        WHERE sss = parent
+
+        RETURN p.chunk_id as chunk_id,
+               p.original_chunk_id as original_chunk_id,
+               p.text as text,
+               p.page as page,
+               p.number as number,
+               c.id as chapter_id,
+               c.title as chapter_title,
+               s.title as section_title,
+               ss.title as subsection_title,
+               sss.title as subsubsection_title
+        LIMIT 1
+        """
+        with self.driver.session() as session:
+            result = session.run(query, chunk_id=chunk_id)
+            record = result.single()
+
+            if not record:
+                return None
+
+            # Build hierarchy path
+            hierarchy_parts = []
+            if record["chapter_title"]:
+                hierarchy_parts.append(record["chapter_title"])
+            if record["section_title"]:
+                hierarchy_parts.append(record["section_title"])
+            if record["subsection_title"]:
+                hierarchy_parts.append(record["subsection_title"])
+            if record["subsubsection_title"]:
+                hierarchy_parts.append(record["subsubsection_title"])
+
+            return {
+                "chunk_id": record["chunk_id"],
+                "original_chunk_id": record["original_chunk_id"],
+                "text": record["text"],
+                "page": record["page"],
+                "number": record["number"],
+                "chapter_id": record["chapter_id"],
+                "hierarchy": " > ".join(hierarchy_parts),
+                "hierarchy_parts": {
+                    "chapter": record["chapter_title"],
+                    "section": record["section_title"],
+                    "subsection": record["subsection_title"],
+                    "subsubsection": record["subsubsection_title"],
+                },
+            }
+
     def link_sequential_paragraphs(self, chapter_id: str, version_id: Optional[str] = None) -> int:
         """Create NEXT/PREV relationships between paragraphs in reading order.
 

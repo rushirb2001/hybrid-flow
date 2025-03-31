@@ -20,7 +20,7 @@ class QueryEngine:
         self,
         qdrant_storage: QdrantStorage,
         neo4j_storage: Neo4jStorage,
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT",
     ):
         """Initialize query engine.
 
@@ -80,54 +80,23 @@ class QueryEngine:
         Returns:
             Dictionary with paragraph text and hierarchy path
         """
-        # Query supports both versioned and non-versioned data:
-        # - Non-versioned: p.chunk_id matches directly
-        # - Versioned: p.original_chunk_id matches the non-versioned chunk_id from Qdrant
-        query = """
-        MATCH (p:Paragraph)
-        WHERE p.chunk_id = $chunk_id OR p.original_chunk_id = $chunk_id
-        OPTIONAL MATCH path = (c:Chapter)-[:HAS_SECTION]->(s:Section)
-                      -[:HAS_SUBSECTION*0..1]->(ss)
-                      -[:HAS_SUBSUBSECTION*0..1]->(sss)
-                      -[:HAS_PARAGRAPH]->(p)
-        RETURN p.text as text,
-               p.page as page,
-               c.id as chapter_id,
-               c.title as chapter_title,
-               s.title as section_title,
-               ss.title as subsection_title,
-               sss.title as subsubsection_title
-        """
+        context = self.neo4j_storage.get_paragraph_context(chunk_id)
 
-        with self.neo4j_storage.driver.session() as session:
-            result = session.run(query, chunk_id=chunk_id)
-            record = result.single()
+        if not context:
+            logger.warning(f"No context found for chunk_id: {chunk_id}")
+            return None
 
-            if not record:
-                logger.warning(f"No context found for chunk_id: {chunk_id}")
-                return None
-
-            hierarchy_parts = []
-            if record["chapter_title"]:
-                hierarchy_parts.append(record["chapter_title"])
-            if record["section_title"]:
-                hierarchy_parts.append(record["section_title"])
-            if record["subsection_title"]:
-                hierarchy_parts.append(record["subsection_title"])
-            if record["subsubsection_title"]:
-                hierarchy_parts.append(record["subsubsection_title"])
-
-            return {
-                "text": record["text"],
-                "page": record["page"],
-                "chapter_id": record["chapter_id"],
-                "hierarchy": " > ".join(hierarchy_parts),
-                # Detailed hierarchy components (TASK 2.1 enhancement)
-                "chapter_title": record["chapter_title"],
-                "section_title": record["section_title"],
-                "subsection_title": record["subsection_title"],
-                "subsubsection_title": record["subsubsection_title"],
-            }
+        return {
+            "text": context["text"],
+            "page": context["page"],
+            "chapter_id": context["chapter_id"],
+            "hierarchy": context["hierarchy"],
+            # Detailed hierarchy components (TASK 2.1 enhancement)
+            "chapter_title": context["hierarchy_parts"]["chapter"],
+            "section_title": context["hierarchy_parts"]["section"],
+            "subsection_title": context["hierarchy_parts"]["subsection"],
+            "subsubsection_title": context["hierarchy_parts"]["subsubsection"],
+        }
 
     def hybrid_search(
         self,
@@ -338,11 +307,19 @@ class QueryEngine:
         ORDER BY p.number
         LIMIT 1
 
-        // Get full hierarchy context
+        // Get chapter
         OPTIONAL MATCH (c:Chapter)-[:HAS_SECTION]->(s:Section)
-                      -[:HAS_SUBSECTION*0..1]->(ss)
-                      -[:HAS_SUBSUBSECTION*0..1]->(sss)
-        WHERE section = s OR section = ss OR section = sss
+        WHERE section = s
+           OR (s)-[:HAS_SUBSECTION]->(section)
+           OR (s)-[:HAS_SUBSECTION]->()-[:HAS_SUBSUBSECTION]->(section)
+
+        // Get subsection if applicable
+        OPTIONAL MATCH (s)-[:HAS_SUBSECTION]->(ss:Subsection)
+        WHERE section = ss OR (ss)-[:HAS_SUBSUBSECTION]->(section)
+
+        // Get subsubsection if applicable
+        OPTIONAL MATCH (ss)-[:HAS_SUBSUBSECTION]->(sss:Subsubsection)
+        WHERE section = sss
 
         RETURN p.chunk_id as chunk_id,
                p.number as number,
@@ -355,6 +332,7 @@ class QueryEngine:
                s.title as section_title_level1,
                ss.title as subsection_title,
                sss.title as subsubsection_title
+        LIMIT 1
         """
 
         with self.neo4j_storage.driver.session() as session:

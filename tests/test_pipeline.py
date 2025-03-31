@@ -17,7 +17,7 @@ def pipeline(tmp_path):
         neo4j_user="neo4j",
         neo4j_password="password",
         metadata_db_path=str(tmp_path / "test_metadata.db"),
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT",
     )
     yield pipeline_instance
     pipeline_instance.close()
@@ -154,7 +154,7 @@ def test_ingest_chapter_creates_qdrant_vectors(pipeline, bailey_chapter_file):
     # Note: Qdrant uses upsert, so count may not increase if vectors already exist
     from hybridflow.parsing.embedder import EmbeddingGenerator
 
-    embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embedder = EmbeddingGenerator(model_name="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT")
     query_embedding = embedder.generate_embedding("shock")
 
     # Search for vectors from bailey:ch2
@@ -216,7 +216,7 @@ def test_ingest_modified_chapter_updates(bailey_chapter_file, tmp_path):
         neo4j_user="neo4j",
         neo4j_password="password",
         metadata_db_path=str(tmp_path / "test_metadata_v2.db"),
-        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT",
     )
 
     try:
@@ -299,7 +299,7 @@ def test_ingest_qdrant_vectors_have_metadata(pipeline, bailey_chapter_file):
     # Search for a vector from this chapter
     from hybridflow.parsing.embedder import EmbeddingGenerator
 
-    embedder = EmbeddingGenerator(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embedder = EmbeddingGenerator(model_name="pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT")
     query_embedding = embedder.generate_embedding("shock pathophysiology")
 
     results = pipeline.qdrant_storage.client.query_points(

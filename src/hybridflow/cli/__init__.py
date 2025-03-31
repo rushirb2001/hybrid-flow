@@ -44,8 +44,9 @@ def load_config() -> dict:
         "neo4j_password": os.getenv("NEO4J_PASSWORD", "password"),
         "metadata_db_path": os.getenv("METADATA_DB_PATH", "./metadata.db"),
         "embedding_model": os.getenv(
-            "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+            "EMBEDDING_MODEL", "pritamdeka/S-PubMedBert-MS-MARCO-SCIFACT"
         ),
+        "vector_size": int(os.getenv("VECTOR_SIZE", "768")),
     }
 
     return config
@@ -68,6 +69,7 @@ def create_pipeline(config: dict) -> IngestionPipeline:
         neo4j_password=config["neo4j_password"],
         metadata_db_path=config["metadata_db_path"],
         embedding_model=config["embedding_model"],
+        vector_size=config["vector_size"],
     )
 
 
